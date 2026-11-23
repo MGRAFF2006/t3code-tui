@@ -42,6 +42,7 @@ import { request } from "./rpc/request.ts";
 import { theme } from "./theme/index.ts";
 import { createTerminalAppearance } from "./theme/appearance.ts";
 import { chooseTerminalAppearance } from "./ui/appearance.ts";
+import { chooseToolVisibility } from "./ui/tool-visibility.ts";
 import type { TuiPreferences } from "./runtime/preferences.ts";
 import { icon, setIconMode, type IconMode, type IconName } from "./presentation/icons.ts";
 import { selectableModels } from "./presentation/models.ts";
@@ -1261,6 +1262,12 @@ export function App(props: { client: TuiClient | null; demo?: boolean; onExit: (
       },
       { title: "Toggle sidebar", category: "Layout", run: toggleSidebar },
       { title: "Toggle workspace panel", category: "Layout", run: toggleWorkspace },
+      {
+        title: "Tool visibility",
+        category: "Conversation",
+        description: "Show all, hide successful, hide all, or Zen.",
+        run: () => chooseToolVisibility(feature()),
+      },
       {
         title: "Terminal appearance",
         category: "Layout",

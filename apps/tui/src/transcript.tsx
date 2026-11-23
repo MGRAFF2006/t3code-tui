@@ -20,7 +20,7 @@ import {
 } from "@t3tools/client-runtime/work-log/item-detail";
 import { useRenderer } from "@opentui/solid";
 import * as DateTime from "effect/DateTime";
-import type { TimestampFormat } from "@t3tools/contracts/settings";
+import type { TimestampFormat, ToolCallVisibility } from "@t3tools/contracts/settings";
 import {
   createEffect,
   createMemo,
@@ -55,6 +55,8 @@ import {
   summarizeTranscriptWork,
   transcriptItemKey,
   transcriptEntryMatches,
+  visibleTranscriptItems,
+  visibleTranscriptFallbackMessages,
   type TranscriptRow,
 } from "./transcript.logic.ts";
 
@@ -756,6 +758,8 @@ export function Transcript(props: {
   hidePendingRequests?: boolean;
   wordWrap?: boolean | undefined;
   timestampFormat?: TimestampFormat | undefined;
+  toolCallVisibility?: ToolCallVisibility | undefined;
+  findActive?: boolean | undefined;
   onOpenHtml?: ((html: string, title?: string) => void) | undefined;
   onPreviewAsset?: ((resource: AssetResource, label: string) => void) | undefined;
   loadAsset?: ((resource: AssetResource) => Promise<AssetBytes>) | undefined;
@@ -789,13 +793,14 @@ export function Transcript(props: {
     }
     previouslyExpanded = expanded;
   });
-  const grouped = createMemo(
-    () =>
-      new Map(groupTranscriptItems(props.projection.visibleTurnItems).map((row) => [row.key, row])),
+  const filteredItems = createMemo(() =>
+    visibleTranscriptItems(props.projection, props.toolCallVisibility ?? "showAll", {
+      findActive: props.findActive,
+      revealedEntryId: props.highlightedEntryId,
+    }),
   );
-  const keys = createMemo(() => [...grouped().keys()]);
   const items = createMemo(() =>
-    props.projection.visibleTurnItems.filter((entry) => {
+    filteredItems().filter((entry) => {
       if (!props.hidePendingRequests) return true;
       const item = entry.item;
       return !(
@@ -806,12 +811,22 @@ export function Transcript(props: {
       );
     }),
   );
+  const grouped = createMemo(
+    () => new Map(groupTranscriptItems(filteredItems()).map((row) => [row.key, row])),
+  );
+  const keys = createMemo(() => [...grouped().keys()]);
   const visibleKeys = createMemo(() => new Set(items().map(transcriptItemKey)));
   return (
     <Show
-      when={items().length > 0}
+      when={props.projection.visibleTurnItems.length > 0}
       fallback={
-        <For each={props.projection.messages}>
+        <For
+          each={visibleTranscriptFallbackMessages(
+            props.projection,
+            props.toolCallVisibility ?? "showAll",
+            { findActive: props.findActive, revealedEntryId: props.highlightedEntryId },
+          )}
+        >
           {(message) => (
             <box marginBottom={1}>
               <text fg={message.role === "user" ? theme.primary : theme.textMuted}>

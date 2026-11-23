@@ -3,6 +3,7 @@ import type { TuiPreferencesPatch } from "../runtime/preferences.ts";
 import { DEFAULT_TUI_PREFERENCES } from "../runtime/preferences.ts";
 import { editPanelWidths, resetPanelWidths } from "../ui/panel-widths.ts";
 import { chooseTerminalAppearance } from "../ui/appearance.ts";
+import { chooseToolVisibility, toolVisibilityLabels } from "../ui/tool-visibility.ts";
 import type { FeatureProps } from "../ui/controller.ts";
 import { theme, themeMode } from "../theme/index.ts";
 import { Action, Section } from "./common.tsx";
@@ -25,6 +26,12 @@ export function createTerminalSettings(props: FeatureProps) {
             : "Light",
       description: "Choose Light or Dark, or follow this terminal with System.",
       run: () => chooseTerminalAppearance(props),
+    },
+    {
+      title: "Tool visibility",
+      value: toolVisibilityLabels[preferences().toolCallVisibility],
+      description: "Show all, hide successful calls, hide all calls, or focus on replies with Zen.",
+      run: () => chooseToolVisibility(props),
     },
     {
       title: "Icons",
@@ -140,7 +147,7 @@ export function createTerminalSettings(props: FeatureProps) {
     {
       title: "Reset terminal preferences",
       description:
-        "Restore System appearance, automatic icons, system time format, Enter to send, queued follow-ups, wrapping, unified diffs and default panel widths.",
+        "Restore System appearance, all tool calls, automatic icons, system time format, Enter to send, queued follow-ups, wrapping, unified diffs and default panel widths.",
       run: () =>
         props.ui.confirm(
           "Reset terminal preferences",

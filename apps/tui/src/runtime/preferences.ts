@@ -3,7 +3,7 @@ import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
-import { TimestampFormat } from "@t3tools/contracts/settings";
+import { TimestampFormat, ToolCallVisibility } from "@t3tools/contracts/settings";
 import {
   preparePrivateDirectory,
   readPrivateFile,
@@ -28,6 +28,9 @@ const Preferences = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed("enter")),
   ),
   wordWrap: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  toolCallVisibility: ToolCallVisibility.pipe(
+    Schema.withDecodingDefault(Effect.succeed("showAll")),
+  ),
   diffView: Schema.Literals(["unified", "split"]).pipe(
     Schema.withDecodingDefault(Effect.succeed("unified")),
   ),

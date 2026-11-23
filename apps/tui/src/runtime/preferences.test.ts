@@ -24,6 +24,7 @@ describe("terminal preferences", () => {
           yield* Effect.promise(() => NodeFSP.writeFile(credentialFile, credentials));
           const fresh = yield* Effect.promise(() => createPreferences(directory));
           expect(fresh.get().theme).toBe("system");
+          expect(fresh.get().toolCallVisibility).toBe("showAll");
           yield* Effect.promise(() =>
             NodeFSP.writeFile(
               NodePath.join(directory, "preferences.json"),
@@ -56,7 +57,12 @@ describe("terminal preferences", () => {
           yield* Effect.promise(() =>
             Promise.all([
               first.update({ wordWrap: false }),
-              first.update({ diffView: "split", followUpMode: "steer", icons: "nerd" }),
+              first.update({
+                diffView: "split",
+                followUpMode: "steer",
+                icons: "nerd",
+                toolCallVisibility: "zen",
+              }),
             ]),
           );
           unsubscribe();
@@ -66,6 +72,7 @@ describe("terminal preferences", () => {
             theme: "light",
             sendShortcut: "ctrl-s",
             wordWrap: false,
+            toolCallVisibility: "zen",
             diffView: "split",
             followUpMode: "steer",
             timestampFormat: "12-hour",

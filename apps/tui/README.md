@@ -52,6 +52,8 @@ In conversation, Enter sends and **Alt+Enter** inserts a line break; enhanced ke
 
 Consecutive tool and reasoning activity collapses into a work group. Expand a group or individual item to read its details and live command output; **Expand work** opens all groups. Messages, requests, plans and important notices remain separate. Drafts and saved prompts persist privately on this computer. `/clear` starts fresh agent context on the next send; `/compact` compacts the current context when the provider supports it.
 
+**Ctrl+P → Tool visibility**, **Settings → Terminal → Tool visibility**, or **Ctrl+O → Tool visibility** chooses Show all, Hide successful, Hide all or Zen. Zen focuses on replies, requests and important notices. Conversation find temporarily reveals intermediate messages in Zen. The work log still lists hidden entries; choose Show all to restore them. This preference is saved locally across environments.
+
 **Ctrl+T** hands the terminal directly to T3's PTY. **Ctrl+]** returns to the interface and leaves that shell running. Project scripts use separate terminal sessions so they do not inject commands into an existing foreground process.
 
 ## Workflows

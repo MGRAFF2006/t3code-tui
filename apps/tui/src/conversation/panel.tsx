@@ -47,6 +47,7 @@ import type { Choice, FeatureProps } from "../ui/controller.ts";
 import { request, subscribe } from "../rpc/request.ts";
 import { theme } from "../theme/index.ts";
 import { Transcript, turnItemText } from "../transcript.tsx";
+import { chooseToolVisibility, toolVisibilityLabels } from "../ui/tool-visibility.ts";
 import { messageLinkActions } from "../presentation/links.ts";
 import { answerSecretRequest } from "../management/secrets.tsx";
 import { copyTerminalText } from "../presentation/terminal.ts";
@@ -737,6 +738,10 @@ function ThreadConversation(
   };
   function workLog() {
     props.ui.choose("Work log", [
+      {
+        title: `Tool visibility: ${toolVisibilityLabels[preferences().toolCallVisibility]}`,
+        run: () => chooseToolVisibility(props),
+      },
       {
         title: expandWork() ? "Collapse all details" : "Expand all details",
         run: () => setExpandWork((value) => !value),
@@ -1725,6 +1730,8 @@ function ThreadConversation(
           hidePendingRequests
           wordWrap={preferences().wordWrap}
           timestampFormat={preferences().timestampFormat}
+          toolCallVisibility={preferences().toolCallVisibility}
+          findActive={Boolean(findQuery() && (findResult() || finding()))}
           expandAll={expandWork()}
           highlightedEntryId={findResult()?.match?.entryId}
           onOpenItem={openItem}
