@@ -72,7 +72,9 @@ import {
   type ProviderApprovalDecision,
   type ProviderUserInputAnswers,
   type ChatAttachment,
-  type CommandId,
+  type PersistChatAttachmentsResult,
+  type UploadChatAttachment,
+  CommandId,
   type ServerSelfUpdateInput,
   type RuntimeMode,
   type OrchestrationMessageContext,
@@ -93,6 +95,7 @@ import {
   resolveNewThreadEnvMode,
   resolveSendEnvMode,
 } from "@t3tools/shared/projectSettings";
+import { remapComposerContextAttachments } from "@t3tools/shared/composerContextReferences";
 import { parseT3ProjectFile } from "@t3tools/shared/t3ProjectFile";
 import { resolveNewThreadModelSelection } from "@t3tools/shared/usageLimits";
 import * as DateTime from "effect/DateTime";
@@ -111,6 +114,8 @@ import { createRpcBridge } from "../rpc/bridge.ts";
 import { createAuthEnvironmentAtoms } from "@t3tools/client-runtime/state/auth";
 import { createLocalAttachmentUploads, type LocalAttachment } from "./attachments.ts";
 import { createPreferences } from "./preferences.ts";
+import type { Draft } from "../conversation/draft.ts";
+import { createSendOutbox, type PendingSend, type PendingSendInput } from "./send-outbox.ts";
 import { readAsset } from "./assets.ts";
 import { resolveDeviceHubAccess } from "@t3tools/client-runtime/state/deviceHubAccess";
 import { PREVIEW_STREAM_BASE_PATH } from "@t3tools/client-runtime/preview/server-browser-stream";
@@ -161,6 +166,7 @@ export interface TuiSnapshot {
   readonly thread: OrchestrationV2ThreadProjection | null;
   readonly hasMoreHistory: boolean;
   readonly workspaceMutationId: string | null;
+  readonly pendingSends?: readonly PendingSend[];
 }
 
 type PasswordHandler = (request: SshPasswordRequest) => Promise<string | null>;
@@ -232,6 +238,8 @@ export async function createTuiClient(options: TuiConnectionOptions = {}) {
   const configDir =
     options.configDir ?? NodePath.join(NodeOS.homedir(), ".local", "state", "t3-tui");
   const preferences = await createPreferences(configDir);
+  const outbox = await createSendOutbox(configDir);
+  const sendingThreads = new Set<string>();
   const passwords = createPasswordPrompt();
   const { layer, cloud } = await createClientLayer(configDir, passwords.service);
   const runtime = Atom.runtime(layer);
@@ -373,6 +381,7 @@ export async function createTuiClient(options: TuiConnectionOptions = {}) {
     thread: null,
     hasMoreHistory: false,
     workspaceMutationId: null,
+    pendingSends: outbox.get(),
     terminalMetadata: { terminals: [], loading: environmentId !== null, error: null },
   };
   const listeners = new Set<(value: TuiSnapshot) => void>();
@@ -386,6 +395,7 @@ export async function createTuiClient(options: TuiConnectionOptions = {}) {
     snapshot = { ...snapshot, ...patch };
     for (const listener of listeners) listener(snapshot);
   };
+  const stopOutbox = outbox.subscribe((pendingSends) => update({ pendingSends }));
   const observe = <A>(atom: Atom.Atom<A>, listener: (value: A) => void, owners = stops) => {
     const dispose = registry.subscribe(atom, listener, { immediate: true });
     owners.add(dispose);
@@ -773,6 +783,19 @@ export async function createTuiClient(options: TuiConnectionOptions = {}) {
     });
     observeEnvironment();
   };
+  const requirePendingDestination = (entry: PendingSend) => {
+    if (closed || requireEnvironment() !== entry.environmentId)
+      throw new Error("Switch to this pending send's environment first.");
+  };
+  const dispatchPendingSend = (id: string) =>
+    outbox.dispatch(id, async (entry, input) => {
+      requirePendingDestination(entry);
+      const result = await threadCommands.startTurn.run(registry, {
+        environmentId: entry.environmentId,
+        input,
+      });
+      if (result._tag === "Failure") throw squashAtomCommandFailure(result);
+    });
   let searchRowsMount = 0;
   const client = {
     localStateDirectory: configDir,
@@ -1216,6 +1239,7 @@ export async function createTuiClient(options: TuiConnectionOptions = {}) {
         localAttachments?: ReadonlyArray<LocalAttachment>;
         freshContext?: boolean;
         compactBeforeSend?: boolean;
+        composerDraft?: Draft;
       },
     ) => {
       const destination = requireEnvironment();
@@ -1230,12 +1254,50 @@ export async function createTuiClient(options: TuiConnectionOptions = {}) {
       let dispatchMode = options?.dispatchMode;
       const freshContext = options?.freshContext;
       const compactBeforeSend = options?.compactBeforeSend;
-      const messageId = MessageId.make(await uuid());
-      const uploaded = locals.length ? await run(localUploads.prepare(destination, locals)) : [];
-      if (compactBeforeSend && !freshContext) {
-        const compacted = await threadCommands.startTurn.run(registry, {
-          environmentId: destination,
-          input: {
+      const scope = `${destination}/${threadId}`;
+      if (sendingThreads.has(scope))
+        throw new Error("A message is already being prepared or sent to this conversation.");
+      sendingThreads.add(scope);
+      try {
+        const existing = await outbox.refresh();
+        if (
+          existing.some(
+            (entry) => entry.environmentId === destination && entry.threadId === threadId,
+          )
+        )
+          throw new Error(
+            "This conversation has an unconfirmed send. Open Pending sends to check or retry the original message.",
+          );
+        const commandId = CommandId.make(await uuid());
+        const messageId = MessageId.make(await uuid());
+        const uploaded = locals.length ? await run(localUploads.prepare(destination, locals)) : [];
+        const inlineUploads = attachments.filter(
+          (attachment): attachment is UploadChatAttachment => "dataUrl" in attachment,
+        );
+        const transport = createRpcBridge(runtime, registry, () => destination, observe);
+        const persisted = inlineUploads.length
+          ? ((await transport.invoke(WS_METHODS.assetsPersistChatAttachments, {
+              threadId,
+              messageId,
+              attachments: inlineUploads,
+            })) as PersistChatAttachmentsResult)
+          : null;
+        const persistedAttachments = attachments.map((attachment) => {
+          if (!("dataUrl" in attachment)) return attachment;
+          const stored = persisted?.attachments[inlineUploads.indexOf(attachment)];
+          if (!stored)
+            throw new Error("An attachment could not be persisted. Send was not dispatched.");
+          return stored;
+        });
+        const sendContext = remapComposerContextAttachments(
+          context,
+          attachments,
+          persistedAttachments,
+        );
+        const steps: PendingSendInput[] = [];
+        if (compactBeforeSend && !freshContext) {
+          steps.push({
+            commandId: CommandId.make(`${commandId}:compact`),
             threadId,
             message: {
               messageId: MessageId.make(await uuid()),
@@ -1248,31 +1310,66 @@ export async function createTuiClient(options: TuiConnectionOptions = {}) {
             modelSelection,
             runtimeMode,
             interactionMode: "default",
-          },
-        });
-        if (compacted._tag === "Failure") throw squashAtomCommandFailure(compacted);
-        dispatchMode = "queue";
-      }
-      const result = await threadCommands.startTurn.run(registry, {
-        environmentId: destination,
-        input: {
+          });
+          dispatchMode = "queue";
+        }
+        const message: PendingSendInput = {
+          commandId,
           threadId,
           message: {
             messageId,
             role: "user",
             text,
-            attachments: [...attachments, ...uploaded],
-            ...(context ? { context } : {}),
+            attachments: [...persistedAttachments, ...uploaded],
+            ...(sendContext ? { context: sendContext } : {}),
           },
           ...(dispatchMode ? { dispatchMode } : {}),
           ...(freshContext ? { freshContext } : {}),
           modelSelection,
           runtimeMode,
           interactionMode,
-        },
-      });
-      if (result._tag === "Failure") throw squashAtomCommandFailure(result);
-      localUploads.complete(destination, locals);
+        };
+        await outbox.add({
+          id: commandId,
+          environmentId: destination,
+          threadId,
+          createdAt: DateTime.formatIso(DateTime.nowUnsafe()),
+          steps: [...steps, message],
+          nextStep: 0,
+          ...(options?.composerDraft ? { composerDraft: options.composerDraft } : {}),
+        });
+        await dispatchPendingSend(commandId);
+        localUploads.complete(destination, locals);
+      } finally {
+        sendingThreads.delete(scope);
+      }
+    },
+    refreshPendingSends: outbox.refresh,
+    retryPendingSend: async (id: string) => {
+      const entry = await outbox.read(id);
+      requirePendingDestination(entry);
+      await dispatchPendingSend(id);
+      localUploads.complete(entry.environmentId, entry.composerDraft?.attachments ?? []);
+      return entry;
+    },
+    reconcilePendingSend: async (id: string) => {
+      const entry = await outbox.read(id);
+      requirePendingDestination(entry);
+      const destination = entry.environmentId;
+      const transport = createRpcBridge(runtime, registry, () => destination, observe);
+      const projection = (await transport.invoke(ORCHESTRATION_V2_WS_METHODS.getThreadProjection, {
+        threadId: entry.threadId,
+      })) as OrchestrationV2ThreadProjection;
+      const mainMessage = entry.steps[entry.steps.length - 1]!.message.messageId;
+      if (!projection.messages.some((message) => message.id === mainMessage)) return false;
+      await outbox.discard(id);
+      localUploads.complete(entry.environmentId, entry.composerDraft?.attachments ?? []);
+      return entry;
+    },
+    discardPendingSend: async (id: string) => {
+      const entry = await outbox.read(id);
+      requirePendingDestination(entry);
+      await outbox.discard(id);
     },
     interrupt: async () => {
       const result = await threadCommands.interruptTurn.run(registry, {
@@ -1423,6 +1520,7 @@ export async function createTuiClient(options: TuiConnectionOptions = {}) {
       clearViewedThread();
       closed = true;
       passwords.close();
+      stopOutbox();
       for (const stop of stops) stop();
       stops.clear();
       for (const stop of transportStops) stop();

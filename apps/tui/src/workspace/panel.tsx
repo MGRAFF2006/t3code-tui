@@ -44,6 +44,7 @@ export function WorkspacePanel(
     openLine?: number | undefined;
     compact?: boolean | undefined;
     visible?: boolean | undefined;
+    requestedTerminalId?: string | undefined;
   },
 ) {
   const dimensions = useTerminalDimensions();
@@ -237,10 +238,8 @@ export function WorkspacePanel(
       <TerminalsPanel
         {...props}
         cwd={cwd}
-        status={status}
-        mutation={mutation}
-        refresh={refresh}
         visible={tab() === "terminals"}
+        requestedTerminalId={props.requestedTerminalId}
       />
       <DevicesPanel {...props} visible={tab() === "devices"} />
     </box>

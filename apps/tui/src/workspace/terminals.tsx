@@ -1,13 +1,25 @@
 import { scrollbarOptions } from "../ui/scroll.ts";
 import { WS_METHODS } from "@t3tools/contracts";
-import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, Show, type Accessor } from "solid-js";
 import { request } from "../rpc/request.ts";
 import { theme } from "../theme/index.ts";
 import { useActiveKeyboard } from "../ui/keyboard.ts";
-import type { WorkspaceContext } from "./types.ts";
+import type { FeatureProps } from "../ui/controller.ts";
+import { EmbeddedTerminal } from "../terminal/embedded.tsx";
 
-export function TerminalsPanel(props: WorkspaceContext & { visible: boolean }) {
+export function TerminalsPanel(
+  props: FeatureProps & {
+    cwd: Accessor<string | undefined>;
+    visible: boolean;
+    requestedTerminalId?: string | undefined;
+  },
+) {
   const [selected, setSelected] = createSignal(0);
+  const [attached, setAttached] = createSignal<string>();
+  const selectTerminal = (id: string) => {
+    setAttached(id);
+    props.ui.selectTerminal?.(id);
+  };
   const environment = createMemo(() => props.state()?.environmentId);
   const thread = createMemo(() => props.state()?.selectedThreadId);
   const metadata = createMemo(() => props.state()?.terminalMetadata);
@@ -25,6 +37,7 @@ export function TerminalsPanel(props: WorkspaceContext & { visible: boolean }) {
     const id = thread();
     if (!props.visible || !destination || !id) return;
     setSelected(0);
+    setAttached(props.requestedTerminalId);
   });
   function destination() {
     const environmentId = environment();
@@ -69,7 +82,8 @@ export function TerminalsPanel(props: WorkspaceContext & { visible: boolean }) {
         title: value.status === "running" ? "Attach terminal" : "Open terminal",
         run: () => {
           target.check();
-          props.ui.openTerminal?.(value.terminalId);
+          if (value.status === "running") selectTerminal(value.terminalId);
+          else props.ui.openTerminal?.(value.terminalId);
         },
       },
       {
@@ -121,10 +135,65 @@ export function TerminalsPanel(props: WorkspaceContext & { visible: boolean }) {
       },
     ]);
   }
+  function manage() {
+    const target = destination();
+    const active = attached();
+    props.ui.choose("Manage terminals", [
+      ...terminals().map((value) => ({
+        title: `${value.terminalId === active ? "● " : ""}${value.label || value.terminalId}`,
+        description: value.status,
+        run: () => {
+          target.check();
+          if (value.status === "running") selectTerminal(value.terminalId);
+          else props.ui.openTerminal?.(value.terminalId);
+        },
+      })),
+      {
+        title: "New terminal…",
+        run: () => {
+          target.check();
+          create();
+        },
+      },
+      ...(active
+        ? [
+            {
+              title: "Active terminal actions…",
+              run: () => {
+                target.check();
+                const value = terminals().find((value) => value.terminalId === active);
+                if (!value) throw new Error("The terminal changed. Open terminal actions again.");
+                actions(value);
+              },
+            },
+            {
+              title: "Terminal list",
+              run: () => {
+                target.check();
+                setAttached(undefined);
+              },
+            },
+          ]
+        : []),
+      {
+        title: "Placement and view…",
+        run: () => {
+          target.check();
+          props.ui.terminalViewActions?.();
+        },
+      },
+    ]);
+  }
   useActiveKeyboard(
     () => props.visible && props.focused && !props.ui.modal(),
     (event) => {
-      if (event.ctrl || event.meta) return;
+      if (event.name === "f3") {
+        void props.ui.run(async () => manage());
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
+      if (attached() || event.ctrl || event.meta) return;
       if (event.name === "up" || event.name === "down")
         setSelected((value) =>
           Math.max(0, Math.min(terminals().length - 1, value + (event.name === "up" ? -1 : 1))),
@@ -141,7 +210,7 @@ export function TerminalsPanel(props: WorkspaceContext & { visible: boolean }) {
     <box visible={props.visible} flexGrow={1} minHeight={0} paddingX={1}>
       <box height={2} flexDirection="row" alignItems="center">
         <text fg={theme.text} flexGrow={1}>
-          Terminals
+          Terminals · Manage F3
         </text>
         <text
           selectable={false}
@@ -150,13 +219,76 @@ export function TerminalsPanel(props: WorkspaceContext & { visible: boolean }) {
         >
           New [N]
         </text>
+        <text
+          selectable={false}
+          fg={theme.primary}
+          onMouseDown={() => props.ui.terminalViewActions?.()}
+        >
+          View…
+        </text>
       </box>
       <Show when={failure()}>
         <text fg={theme.error} wrapMode="word">
           {failure()}
         </text>
       </Show>
-      <scrollbox scrollbarOptions={scrollbarOptions()} flexGrow={1} minHeight={0}>
+      <Show when={props.visible && attached() && props.cwd() && thread()} keyed>
+        {(_key) => (
+          <box flexDirection="row" flexWrap="wrap" gap={1} flexShrink={0} minHeight={1}>
+            <For each={terminals()}>
+              {(value) => (
+                <text
+                  selectable={false}
+                  fg={
+                    value.hasRunningSubprocess
+                      ? theme.error
+                      : attached() === value.terminalId
+                        ? theme.primary
+                        : theme.textMuted
+                  }
+                  onMouseDown={() => {
+                    props.onFocus();
+                    selectTerminal(value.terminalId);
+                  }}
+                >
+                  {value.hasRunningSubprocess ? "● " : ""}
+                  {value.label || value.terminalId}
+                </text>
+              )}
+            </For>
+            <text
+              selectable={false}
+              fg={theme.primary}
+              onMouseDown={() =>
+                actions(terminals().find((value) => value.terminalId === attached()))
+              }
+            >
+              Actions…
+            </text>
+            <text
+              selectable={false}
+              fg={theme.textMuted}
+              onMouseDown={() => setAttached(undefined)}
+            >
+              List
+            </text>
+          </box>
+        )}
+      </Show>
+      <Show
+        when={
+          props.visible && attached() && props.cwd() && `${environment()}/${thread()}/${attached()}`
+        }
+        keyed
+      >
+        {(_key) => <EmbeddedTerminal {...props} terminalId={attached()!} cwd={props.cwd()!} />}
+      </Show>
+      <scrollbox
+        visible={!attached()}
+        scrollbarOptions={scrollbarOptions()}
+        flexGrow={1}
+        minHeight={0}
+      >
         <For each={terminals()}>
           {(value, index) => (
             <box
@@ -195,7 +327,11 @@ export function TerminalsPanel(props: WorkspaceContext & { visible: boolean }) {
           </text>
         </Show>
       </scrollbox>
-      <text fg={theme.textMuted}>↑↓ select · Enter actions · N new · Ctrl+T quick attach</text>
+      <text height={1} fg={theme.textMuted} truncate>
+        {attached()
+          ? "^] chat · ^F find · F2 output · shift+drag select"
+          : "↑↓ select · Enter actions · N new · Ctrl+T quick attach"}
+      </text>
     </box>
   );
 }

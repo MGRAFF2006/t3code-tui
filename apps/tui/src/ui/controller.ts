@@ -1,4 +1,8 @@
-import type { AssetResource, ProviderInstanceId } from "@t3tools/contracts";
+import type {
+  AssetResource,
+  KnownComposerContextRecord,
+  ProviderInstanceId,
+} from "@t3tools/contracts";
 import type { Accessor } from "solid-js";
 import type { TuiClient, TuiSnapshot } from "../runtime/client.ts";
 
@@ -47,6 +51,11 @@ export interface UiController {
   confirm(title: string, message: string, action: () => Promise<void>, label?: string): void;
   text(title: string, content: string, language?: string): void;
   openTerminal?(terminalId?: string): void;
+  terminalViewActions?(): void;
+  terminalSuspended?: Accessor<boolean>;
+  selectTerminal?(id: string): void;
+  addComposerContext?(record: KnownComposerContextRecord): void;
+  pendingSendActions?(): void;
   openHtml?(html: string, title?: string): void;
   openArtifact?(resource: AssetResource, label: string): void;
   previewImage?(resource: AssetResource, label: string): void;

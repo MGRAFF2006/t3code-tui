@@ -1,4 +1,5 @@
 import { help, parseCli } from "./cli.ts";
+import { preserveTerminalTitle } from "./presentation/terminal-title.ts";
 
 async function main() {
   const options = parseCli(Bun.argv.slice(2));
@@ -28,9 +29,12 @@ async function main() {
     if (renderer) renderer.destroy();
     else client?.close();
   };
+  let restoreTitle = () => {};
   try {
+    restoreTitle = preserveTerminalTitle(process.stdout);
     if (options.thread) client?.selectThread(options.thread);
     renderer = await createCliRenderer({ exitOnCtrlC: false, targetFps: 30 });
+    void renderer.closed.then(restoreTitle, restoreTitle);
     renderer.once("destroy", () => client?.close());
     await render(
       () => createComponent(App, { client, demo: options.demo, onExit: close }),
@@ -38,6 +42,8 @@ async function main() {
     );
   } catch (error) {
     close();
+    if (renderer) await renderer.closed;
+    restoreTitle();
     throw error;
   }
 }

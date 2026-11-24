@@ -81,13 +81,15 @@ Work groups and individual work entries show elapsed time when their timestamps 
 
 **Ctrl+P → Search settings**, or **Ctrl+F** or **/** inside Settings, searches the available native settings by name, section and description. In management lists, click to select a row, use the wheel to move, and press Enter to open it.
 
-**Ctrl+T** hands the terminal directly to T3's PTY. **Ctrl+]** returns to the interface and leaves that shell running. Project scripts use separate terminal sessions so they do not inject commands into an existing foreground process.
+**Ctrl+T** opens the thread's terminal below the conversation. **Terminal placement and view** in Commands moves it into the workspace panel or opens a full-screen shell. **Ctrl+]** returns focus to chat and leaves the shell running. **Ctrl+F** searches retained terminal output; **F2** offers selection copying, output links and adding selected output to the message draft. Project scripts use separate terminal sessions so they do not inject commands into an existing foreground process.
 
 ## Workflows
 
 Provider and conversation warnings offer recovery actions through **Actions**, **Recovery**, or `/status` followed by Tab. Open the selected provider's setup, refresh its status, inspect the full error, or restore a dismissed notice. For usage limits, **Resume at reset** and **Snooze until reset** are independent choices; **Cancel auto-resume** and **Wake now** reverse them. ChatGPT account usage management opens in your browser.
 
 When an interrupted or usage-limited turn can continue, **Resume thread**, `/resume`, or sending with an empty composer resumes it. Pending requests and active work must be resolved first. A held queue resumes after the continuation is accepted.
+
+If a message's acceptance is uncertain, **Pending sends** in Commands or the delivery menu keeps its captured destination and draft available after restart. Reconcile checks saved server messages; Retry original reuses its command identities and requires confirmation. Nothing resends automatically. Discard removes only the local recovery record, keeps the draft, and does not cancel accepted work. Review retained text before sending again.
 
 **Settings → Usage** includes native daily/hourly provider charts for processed tokens and known cost, provider visibility, paging and exact period details. Unknown prices and incomplete sources remain visible. Hourly windows use explicit timestamps and are limited to 24 hours.
 
@@ -144,7 +146,7 @@ Electron can render a BrowserWindow into a bitmap using [offscreen rendering](ht
 
 The [desktop compatibility audit](https://github.com/MGRAFF2006/t3code-tui/issues/1) uses desktop features as its target and records native controls, explicit graphical handoffs, missing behavior and verification evidence separately. The command palette’s **Developer → Service inspector** retains typed access to less common operations; this is an advanced request editor, not dedicated interface parity.
 
-Remaining gaps include a durable offline send queue, dictation, custom themes and remapping the terminal’s own shortcuts. Advanced PR review controls, some connection-host administration and embedded MCP app interfaces also remain partial. Server web/desktop keybindings can be edited here; they do not remap TUI controls.
+Remaining gaps include dictation, custom themes and remapping the terminal’s own shortcuts. Pending sends covers existing-thread messages; new-thread launch, fanout and queued-message edits use their separate flows. Advanced PR review controls, some connection-host administration and embedded MCP app interfaces also remain partial. Server web/desktop keybindings can be edited here; they do not remap TUI controls.
 
 Shared browser interaction and device display/input remain missing from this client. Opening a browser URL locally does not carry the shared browser's profile or session. Device management controls do not open a simulator view. Desktop window/tray controls and screen-selection gestures also remain unavailable. Text/source, supported image assets and cached notebook cells render natively; executable notebook output, office-document layout and media playback use explicit external viewers. The terminal owns fonts and opacity. Interface text is currently English; server/provider content retains its original language.
 

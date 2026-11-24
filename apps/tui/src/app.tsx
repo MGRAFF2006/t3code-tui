@@ -29,6 +29,7 @@ import {
   isListedThreadLineage,
   type OrchestrationV2Command,
   type OrchestrationV2ThreadShell,
+  type KnownComposerContextRecord,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -77,7 +78,12 @@ import { createThreadSearch, type ThreadSearchRow } from "./presentation/thread-
 import { threadSearchQuery } from "./presentation/thread-search.logic.ts";
 import { findForMessageMatch, foldSearchQuery } from "@t3tools/shared/paletteSearch";
 import type { Area, Choice, FieldFormOptions, UiController } from "./ui/controller.ts";
-import { ConversationPanel, type ThreadSearchTarget } from "./conversation/panel.tsx";
+import {
+  ConversationPanel,
+  settleRecoveredSend,
+  type ThreadSearchTarget,
+  type ComposerContextRequest,
+} from "./conversation/panel.tsx";
 import { WorkspacePanel, type WorkspaceTab } from "./workspace/panel.tsx";
 import { TerminalActivity } from "./ui/terminal-activity.tsx";
 import { createTerminalActivity } from "./presentation/terminal-activity.ts";
@@ -99,6 +105,9 @@ import { openTerminal } from "./terminal/session.ts";
 import { configureThreadDetails } from "./features/thread-details.tsx";
 import { threadLinkChoices } from "./features/thread-links.ts";
 import { connectionDiagnosticsActions } from "./management/connection-diagnostics.ts";
+import { TerminalsPanel } from "./workspace/terminals.tsx";
+import { createTerminalTitle } from "./presentation/terminal-title.ts";
+import { pendingSendActions } from "./conversation/pending-sends.ts";
 
 type Modal =
   | {
@@ -157,6 +166,11 @@ export function App(props: { client: TuiClient | null; demo?: boolean; onExit: (
   const [focus, setFocus] = createSignal<"sidebar" | "main" | "workspace">("main");
   const [sidebar, setSidebar] = createSignal(true);
   const [workspace, setWorkspace] = createSignal(false);
+  const [terminalPlacement, setTerminalPlacement] = createSignal<"drawer" | "right">("drawer");
+  const [terminalView, setTerminalView] = createSignal<{ scope: string; terminalId: string }>();
+  const [terminalSuspended, setTerminalSuspended] = createSignal(false);
+  const [composerContextRequest, setComposerContextRequest] =
+    createSignal<ComposerContextRequest>();
   const [resizingPanel, setResizingPanel] = createSignal<"left" | "right">();
   const [sidebarWidth, setSidebarWidth] = createSignal(
     props.client?.preferences().sidebarWidth ?? DEFAULT_TUI_PREFERENCES.sidebarWidth,
@@ -340,6 +354,25 @@ export function App(props: { client: TuiClient | null; demo?: boolean; onExit: (
   });
   const thread = () => state()?.thread?.thread;
   const shellThread = () => allThreads().find((entry) => entry.id === state()?.selectedThreadId);
+  const refreshTerminalTitle = process.stdout.isTTY
+    ? createTerminalTitle(renderer, () => {
+        snoozeRevision();
+        return {
+          connection: state()?.connection ?? "disconnected",
+          environment: state()?.label,
+          project: project()?.title,
+          thread: area() === "chat" ? shellThread()?.title : undefined,
+          status: threadStatus(
+            environment() && shellThread()
+              ? presentThreadShell(environment()!, shellThread()!)
+              : null,
+            DateTime.formatIso(serverNow()),
+          ),
+          runningTerminals: terminalActivity().get(state()?.selectedThreadId ?? "") ?? 0,
+          view: destinations.find((entry) => entry.area === area())?.title ?? "T3 Code",
+        };
+      })
+    : () => {};
   // Only the visible conversation in the focused terminal owns server visit tracking.
   createEffect(() => {
     snoozeRevision();
@@ -393,6 +426,11 @@ export function App(props: { client: TuiClient | null; demo?: boolean; onExit: (
   }
   const headerWidth = () => panelLayout().headerWidth;
   const showWorkspace = () => panelLayout().showWorkspace;
+  const terminalScope = () => `${environment()}/${state()?.selectedThreadId}`;
+  const terminalDrawer = () =>
+    area() === "chat" &&
+    terminalPlacement() === "drawer" &&
+    terminalView()?.scope === terminalScope();
   function savePanelWidth(side: "left" | "right") {
     if (!props.client || (side === "left" ? !showSidebar() : !showWorkspace())) return;
     const width = side === "left" ? panelLayout().sidebarWidth : panelLayout().workspaceWidth;
@@ -407,7 +445,8 @@ export function App(props: { client: TuiClient | null; demo?: boolean; onExit: (
     editPanelWidths(feature());
   }
   const activeFocus = () =>
-    (focus() === "workspace" && !showWorkspace()) || (focus() === "sidebar" && !showSidebar())
+    (focus() === "workspace" && !showWorkspace() && !terminalDrawer()) ||
+    (focus() === "sidebar" && !showSidebar())
       ? "main"
       : focus();
   function client() {
@@ -1233,14 +1272,102 @@ export function App(props: { client: TuiClient | null; demo?: boolean; onExit: (
     );
   }
   function terminal(terminalId?: string) {
-    void run(() =>
-      openTerminal({
-        client: client(),
-        renderer,
-        cwd: cwd() ?? "",
-        ...(terminalId ? { terminalId } : {}),
-      }),
-    );
+    const scope = terminalScope();
+    const directory = cwd();
+    const threadId = state()?.selectedThreadId;
+    if (!threadId || !directory) return notify("Select a thread with a workspace first.", true);
+    void run(async () => {
+      const version = ++navigationRequest;
+      if (!(await beforeNavigate()) || version !== navigationRequest) return;
+      if (terminalScope() !== scope)
+        throw new Error("The thread changed. Open its terminal again.");
+      await request(client(), WS_METHODS.terminalOpen, {
+        threadId,
+        terminalId: terminalId ?? "tui",
+        cwd: directory,
+      });
+      if (version !== navigationRequest || terminalScope() !== scope) return;
+      setTerminalView({ scope, terminalId: terminalId ?? "tui" });
+      showTerminalPlacement();
+    });
+  }
+  function showTerminalPlacement() {
+    if (terminalPlacement() === "drawer") {
+      setWorkspace(false);
+      setArea("chat");
+      setFocus("workspace");
+    } else {
+      setWorkspaceTab("terminals");
+      if (dimensions().width >= 132) {
+        setArea("chat");
+        setWorkspace(true);
+        setFocus("workspace");
+      } else {
+        setArea("workspace");
+        setFocus("main");
+      }
+    }
+  }
+  function terminalViewActions() {
+    const scope = terminalScope();
+    const guarded =
+      (action: () => void, navigates = true) =>
+      () =>
+        void run(async () => {
+          const version = ++navigationRequest;
+          if (terminalScope() !== scope)
+            throw new Error("The terminal changed. Open its view menu again.");
+          if (navigates && !(await beforeNavigate())) return;
+          if (version !== navigationRequest || terminalScope() !== scope) return;
+          action();
+        });
+    choose("Terminal view", [
+      {
+        title: "Below conversation",
+        run: guarded(() => {
+          setTerminalPlacement("drawer");
+          showTerminalPlacement();
+        }),
+      },
+      {
+        title: "Workspace panel",
+        run: guarded(() => {
+          setTerminalPlacement("right");
+          showTerminalPlacement();
+        }),
+      },
+      {
+        title: "Close terminal view",
+        description: "The shell keeps running.",
+        run: guarded(() => {
+          setTerminalView(undefined);
+          setWorkspace(false);
+          setArea("chat");
+          setFocus("main");
+        }),
+      },
+      {
+        title: "Full-screen shell (Ctrl+] returns)",
+        run: guarded(
+          () =>
+            void run(async () => {
+              try {
+                setTerminalSuspended(true);
+                await openTerminal({
+                  client: client(),
+                  renderer,
+                  cwd: cwd() ?? "",
+                  terminalId: terminalView()?.terminalId ?? "tui",
+                });
+              } finally {
+                setTerminalSuspended(false);
+                refreshTerminalTitle();
+              }
+            }),
+          false,
+        ),
+      },
+    ]);
   }
   const ui: UiController = {
     modal: () => modal() !== null,
@@ -1258,6 +1385,30 @@ export function App(props: { client: TuiClient | null; demo?: boolean; onExit: (
     confirm,
     text: (title, content, language) => setModal({ kind: "text", title, content, language }),
     openTerminal: terminal,
+    terminalViewActions,
+    terminalSuspended,
+    selectTerminal: (terminalId) => setTerminalView({ scope: terminalScope(), terminalId }),
+    pendingSendActions: () =>
+      pendingSendActions(feature(), (entry) => settleRecoveredSend(client(), entry)),
+    addComposerContext: (record: KnownComposerContextRecord) => {
+      const environmentId = environment();
+      const threadId = state()?.selectedThreadId;
+      if (!environmentId || !threadId)
+        return notify("Select a conversation before adding context.", true);
+      void run(async () => {
+        const version = ++navigationRequest;
+        if (!(await beforeNavigate())) return;
+        if (
+          version !== navigationRequest ||
+          environment() !== environmentId ||
+          state()?.selectedThreadId !== threadId
+        )
+          return;
+        setComposerContextRequest({ environmentId, threadId, record });
+        setArea("chat");
+        setFocus("main");
+      });
+    },
     openBrowser: (url) => {
       void run(() => openBrowser(url));
     },
@@ -1469,6 +1620,8 @@ export function App(props: { client: TuiClient | null; demo?: boolean; onExit: (
         },
       },
       { title: "Open terminal", category: "Workspace", run: terminal },
+      { title: "Pending sends", category: "Conversation", run: () => ui.pendingSendActions?.() },
+      { title: "Terminal placement and view", category: "Workspace", run: terminalViewActions },
       {
         title: "Show thread terminals",
         category: "Workspace",
@@ -1678,13 +1831,24 @@ export function App(props: { client: TuiClient | null; demo?: boolean; onExit: (
     else if (event.ctrl && event.name === "b") toggleSidebar();
     else if (event.ctrl && event.name === "e") toggleWorkspace();
     else if (event.ctrl && event.name === "t") terminal();
-    else if (event.meta && destinations.some((entry) => entry.shortcut === event.name))
+    else if (
+      event.ctrl &&
+      event.name === "]" &&
+      (terminalDrawer() || workspaceTab() === "terminals")
+    ) {
+      void run(async () => {
+        const version = ++navigationRequest;
+        if (!(await beforeNavigate()) || version !== navigationRequest) return;
+        setFocus("main");
+        setArea("chat");
+      });
+    } else if (event.meta && destinations.some((entry) => entry.shortcut === event.name))
       openArea(destinations.find((entry) => entry.shortcut === event.name)!.area);
     else if (event.name === "f1") shortcuts();
     else if (event.name === "f6")
       setFocus((value) =>
         value === "main"
-          ? showWorkspace()
+          ? showWorkspace() || terminalDrawer()
             ? "workspace"
             : showSidebar()
               ? "sidebar"
@@ -2239,6 +2403,11 @@ export function App(props: { client: TuiClient | null; demo?: boolean; onExit: (
                         onSearchTargetHandled={(target) => {
                           if (searchTarget() === target) setSearchTarget(undefined);
                         }}
+                        composerContextRequest={composerContextRequest()}
+                        onComposerContextHandled={(request) => {
+                          if (composerContextRequest() === request)
+                            setComposerContextRequest(undefined);
+                        }}
                       />
                     </Show>
                     <Show when={area() === "workspace"}>
@@ -2255,6 +2424,11 @@ export function App(props: { client: TuiClient | null; demo?: boolean; onExit: (
                         }}
                         openPath={openPath()}
                         openLine={openLine()}
+                        requestedTerminalId={
+                          terminalView()?.scope === terminalScope()
+                            ? terminalView()?.terminalId
+                            : undefined
+                        }
                       />
                     </Show>
                     <Show when={area() === "schedules"}>
@@ -2354,12 +2528,36 @@ export function App(props: { client: TuiClient | null; demo?: boolean; onExit: (
                         openLine={openLine()}
                         visible={showWorkspace()}
                         compact
+                        requestedTerminalId={
+                          terminalView()?.scope === terminalScope()
+                            ? terminalView()?.terminalId
+                            : undefined
+                        }
                       />
                     </box>
                   </box>
                 </Show>
               </box>
             )}
+          </Show>
+          <Show when={props.client && terminalDrawer()}>
+            <box
+              height={Math.max(7, Math.min(18, Math.floor(dimensions().height * 0.4)))}
+              flexShrink={0}
+              border={["top"]}
+              borderColor={theme.border}
+            >
+              <TerminalsPanel
+                client={client()}
+                state={state}
+                ui={ui}
+                focused={activeFocus() === "workspace"}
+                onFocus={() => setFocus("workspace")}
+                cwd={cwd}
+                visible
+                requestedTerminalId={terminalView()?.terminalId}
+              />
+            </box>
           </Show>
         </box>
       </box>

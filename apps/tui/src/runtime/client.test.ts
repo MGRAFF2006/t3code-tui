@@ -174,6 +174,8 @@ describe("terminal client onboarding", () => {
     "configured-defaults",
     "send-switch",
     "compact-send-switch",
+    "concurrent-send-switch",
+    "uncertain-send-switch",
   ] as const)("keeps model selection with the intended destination for %s", (scenario) =>
     Effect.acquireUseRelease(
       Effect.promise(() => NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-tui-model-"))),
@@ -289,6 +291,8 @@ describe("terminal client onboarding", () => {
                   run: async (_registry, target) => {
                     dispatched = target.input;
                     dispatches.push(target.input);
+                    if (scenario === "uncertain-send-switch" && dispatches.length === 2)
+                      throw new Error("Message accepted; reply connection lost");
                     return AsyncResult.success({ sequence: 1 });
                   },
                 },
@@ -333,14 +337,52 @@ describe("terminal client onboarding", () => {
                 client.selectThread(threadB.thread.id);
                 return getRandomValues(array);
               });
-            yield* Effect.promise(() =>
-              client.send("Message for A", {
-                dispatchMode: "queue",
-                context: { version: 1, records: [] },
-                freshContext: scenario === "send-switch",
-                compactBeforeSend: true,
-              }),
-            );
+            const sending = client.send("Message for A", {
+              dispatchMode: "queue",
+              context: { version: 1, records: [] },
+              freshContext: scenario === "send-switch",
+              compactBeforeSend: true,
+              composerDraft: {
+                text: "Message for A",
+                mentions: [],
+                context: [],
+                attachments: [],
+                freshContext: false,
+              },
+            });
+            if (scenario === "concurrent-send-switch")
+              yield* Effect.promise(() =>
+                expect(client.send("Duplicate for A")).rejects.toThrow(
+                  "already being prepared or sent",
+                ),
+              );
+            if (scenario === "uncertain-send-switch") {
+              yield* Effect.promise(() => expect(sending).rejects.toThrow("reply connection lost"));
+              const pending = client.snapshot().pendingSends![0]!;
+              expect(pending).toMatchObject({
+                environmentId: "model-environment",
+                threadId: threadA.thread.id,
+                nextStep: 1,
+              });
+              expect(pending.composerDraft?.text).toBe("Message for A");
+              client.selectThread(threadA.thread.id);
+              yield* Effect.promise(() =>
+                expect(client.send("Message for A")).rejects.toThrow("unconfirmed send"),
+              );
+              expect(dispatches).toHaveLength(2);
+              client.close();
+              _random.mockRestore();
+              const recovered = yield* Effect.promise(() =>
+                createTuiClient({ configDir, url: "http://model-server.invalid" }),
+              );
+              yield* Effect.addFinalizer(() => Effect.sync(() => recovered.close()));
+              expect(recovered.snapshot().pendingSends).toEqual([pending]);
+              const accepted = yield* Effect.promise(() => recovered.retryPendingSend(pending.id));
+              expect(accepted).toEqual(pending);
+              expect(dispatches).toHaveLength(3);
+              expect(dispatches[2]).toEqual(dispatches[1]);
+              expect(recovered.snapshot().pendingSends).toEqual([]);
+            } else yield* Effect.promise(() => sending);
             expect(dispatched).toMatchObject({
               threadId: threadA.thread.id,
               dispatchMode: "queue",
@@ -350,7 +392,9 @@ describe("terminal client onboarding", () => {
               runtimeMode: "approval-required",
               interactionMode: "default",
             });
-            expect(dispatches).toHaveLength(scenario === "send-switch" ? 1 : 2);
+            expect(dispatches).toHaveLength(
+              scenario === "send-switch" ? 1 : scenario === "uncertain-send-switch" ? 3 : 2,
+            );
             if (scenario === "compact-send-switch")
               expect(dispatches[0]).toMatchObject({
                 threadId: threadA.thread.id,

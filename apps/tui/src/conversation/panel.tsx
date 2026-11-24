@@ -20,6 +20,7 @@ import {
   type OrchestrationMessageContext,
   type ProjectId,
   type ChatAttachment,
+  type KnownComposerContextRecord,
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
   isCompactionCommandMessage,
 } from "@t3tools/contracts";
@@ -82,6 +83,8 @@ import { contextActions } from "./context-actions.ts";
 import { planActions } from "./plan.ts";
 import { createFanoutTargets, startFanoutTargets, type FanoutTarget } from "./fanout.ts";
 import { createConversationStatus } from "./provider-status.tsx";
+import type { PendingSend } from "../runtime/send-outbox.ts";
+import type { TuiClient } from "../runtime/client.ts";
 
 const drafts = new Map<string, Draft>();
 const pendingSends = new Set<string>();
@@ -114,6 +117,20 @@ const runtimeLabels: Record<RuntimeMode, string> = {
   "full-access": "Full access",
 };
 
+export async function settleRecoveredSend(client: TuiClient, entry: PendingSend) {
+  if (!entry.composerDraft) return false;
+  const scope = `${entry.environmentId}/${entry.threadId}`;
+  const persistence = draftStore(client.localStateDirectory, () => {});
+  await persistence.ready;
+  const current = drafts.get(scope) ?? persistence.get(scope) ?? entry.composerDraft;
+  const next = settleSentDraft(current, entry.composerDraft);
+  drafts.set(scope, next);
+  persistence.save(scope, next);
+  draftOwners.get(scope)?.apply(next);
+  await persistence.flush();
+  return true;
+}
+
 function ThreadConversation(
   props: FeatureProps & {
     scope: string;
@@ -122,6 +139,8 @@ function ThreadConversation(
     onSearchTargetHandled?: (target: ThreadSearchTarget) => void;
     goalRequestScope?: string | undefined;
     onGoalRequestHandled?: () => void;
+    composerContextRequest?: ComposerContextRequest | undefined;
+    onComposerContextHandled?: (request: ComposerContextRequest) => void;
   },
 ) {
   const dimensions = useTerminalDimensions();
@@ -550,6 +569,36 @@ function ThreadConversation(
         props.state()?.thread?.thread.id === destinationThreadId,
     );
   }
+  // External native panels hand captured context to this mounted destination's saved draft.
+  createEffect(
+    on(
+      () => props.composerContextRequest,
+      (request) => {
+        if (!request) return;
+        if (request.environmentId !== environmentId || request.threadId !== destinationThreadId) {
+          props.ui.notify("The conversation changed. Select the source context again.", true);
+        } else if (sending() || pendingSends.has(props.scope)) {
+          props.ui.notify("Wait for this message to finish sending before adding context.", true);
+        } else {
+          const text = composer?.plainText ?? draft();
+          const active = referencedDraftContext(text, context());
+          if (active.length + mentions().length >= COMPOSER_CONTEXT_MAX_RECORDS)
+            props.ui.notify("Remove some message context before adding more.", true);
+          else {
+            setContext([
+              ...active.filter((record) => record.contextId !== request.record.contextId),
+              request.record,
+            ]);
+            setText(
+              `${text}${text && !/\s$/.test(text) ? " " : ""}${formatComposerContextReference(request.record)} `,
+            );
+            props.ui.notify("Selected terminal output added to the message draft.");
+          }
+        }
+        props.onComposerContextHandled?.(request);
+      },
+    ),
+  );
   function contextMenu() {
     props.ui.choose("Message context", [
       { title: "Add context…", run: addContext },
@@ -1647,6 +1696,7 @@ function ThreadConversation(
     setSending(true);
     try {
       await props.client.send(outgoingText, {
+        composerDraft: captured,
         ...(captured.freshContext ? { freshContext: true } : {}),
         ...(compactTokens() !== null && !captured.freshContext ? { compactBeforeSend: true } : {}),
         ...(delivery
@@ -1863,6 +1913,11 @@ function ThreadConversation(
   function deliveryMenu() {
     fanoutRevision();
     const choices: Choice[] = [
+      {
+        title: "Pending sends",
+        description: "Reconcile or retry an unconfirmed message",
+        run: () => props.ui.pendingSendActions?.(),
+      },
       ...(continuation().available
         ? [
             {
@@ -2367,6 +2422,26 @@ function ThreadConversation(
         borderColor={props.focused ? theme.borderActive : theme.borderSubtle}
         flexShrink={0}
       >
+        <Show
+          when={
+            !sending() &&
+            props
+              .state()
+              ?.pendingSends?.some(
+                (entry) =>
+                  entry.environmentId === environmentId && entry.threadId === destinationThreadId,
+              )
+          }
+        >
+          <text
+            selectable={false}
+            fg={theme.warning}
+            wrapMode="word"
+            onMouseDown={() => props.ui.pendingSendActions?.()}
+          >
+            Unconfirmed send · check Pending sends before sending again
+          </text>
+        </Show>
         <Show when={mentions().some((record) => draft().includes(`@${record.path}`))}>
           <text fg={theme.textMuted} truncate>
             {mentions()
@@ -2554,12 +2629,20 @@ export interface ThreadSearchTarget {
   messageId?: string;
 }
 
+export interface ComposerContextRequest {
+  environmentId: string;
+  threadId: string;
+  record: KnownComposerContextRecord;
+}
+
 export function ConversationPanel(
   props: FeatureProps & {
     searchTarget?: ThreadSearchTarget | undefined;
     onSearchTargetHandled?: (target: ThreadSearchTarget) => void;
     goalRequestScope?: string | undefined;
     onGoalRequestHandled?: () => void;
+    composerContextRequest?: ComposerContextRequest | undefined;
+    onComposerContextHandled?: (request: ComposerContextRequest) => void;
   },
 ) {
   const scope = () =>

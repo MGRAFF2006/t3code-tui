@@ -21,7 +21,7 @@ const LocalAttachment = Schema.Struct({
   sizeBytes: Schema.Number.check(Schema.isGreaterThanOrEqualTo(0)),
   modifiedAtMs: Schema.Number,
 });
-const DraftSchema = Schema.Struct({
+export const DraftSchema = Schema.Struct({
   text: Schema.String.check(Schema.isMaxLength(1_000_000)),
   mentions: Schema.Array(MentionContextRecord).check(
     Schema.isMaxLength(COMPOSER_CONTEXT_MAX_RECORDS),
