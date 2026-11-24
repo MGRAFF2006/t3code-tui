@@ -1,5 +1,4 @@
 // @effect-diagnostics nodeBuiltinImport:off -- Named list views use the terminal's private state directory.
-import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 import * as Schema from "effect/Schema";
 import * as SecureRandom from "effect/crypto/SecureRandom";
@@ -20,6 +19,7 @@ import {
   writePrivateFile,
 } from "../connections/files.ts";
 import type { FeatureProps } from "../ui/controller.ts";
+import { acquirePrivateStateLock } from "../connections/state-lock.ts";
 
 const Query = Schema.String.check(Schema.isMaxLength(200));
 export const PullRequestBrowseFilters = Schema.Struct({
@@ -92,21 +92,17 @@ export async function createSavedViews(directory: string) {
   let pending: Promise<unknown> = Promise.resolve();
   const change = (transform: (views: readonly TuiSavedView[]) => readonly TuiSavedView[]) => {
     const operation = pending.then(async () => {
-      let lock;
-      try {
-        lock = await NodeFSP.open(`${filename}.lock`, "wx", 0o600);
-      } catch (error) {
-        throw new Error("Saved terminal views are busy. Retry after other TUI writes finish.", {
-          cause: error,
-        });
-      }
+      const lock = await acquirePrivateStateLock(
+        `${filename}.lock.sqlite`,
+        "Saved terminal views are busy. Retry after other TUI writes finish.",
+        { wait: false },
+      );
       try {
         const views = transform(await read());
         await writePrivateFile(filename, encode({ version: 1, views }));
         return views;
       } finally {
-        await lock.close();
-        await NodeFSP.rm(`${filename}.lock`);
+        lock.close();
       }
     });
     pending = operation.catch(() => undefined);

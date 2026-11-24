@@ -83,10 +83,8 @@ import { contextActions } from "./context-actions.ts";
 import { planActions } from "./plan.ts";
 import { createFanoutTargets, startFanoutTargets, type FanoutTarget } from "./fanout.ts";
 import { createConversationStatus } from "./provider-status.tsx";
-import type { PendingSend } from "../runtime/send-outbox.ts";
-import type { TuiClient } from "../runtime/client.ts";
+import { drafts, draftOwners, createDraftOwnership } from "./draft-ownership.ts";
 
-const drafts = new Map<string, Draft>();
 const pendingSends = new Set<string>();
 const dismissedSuggestions = new Set<string>();
 const skippedCompactions = new Set<string>();
@@ -109,7 +107,7 @@ const queuedAttachmentEdits = new Map<
   }
 >();
 const queuedAttachmentSends = new Set<string>();
-const draftOwners = new Map<string, { apply: (draft: Draft) => void; settled: () => void }>();
+
 const runtimeLabels: Record<RuntimeMode, string> = {
   "approval-required": "Ask before changes",
   "auto-accept-edits": "Accept edits",
@@ -117,19 +115,7 @@ const runtimeLabels: Record<RuntimeMode, string> = {
   "full-access": "Full access",
 };
 
-export async function settleRecoveredSend(client: TuiClient, entry: PendingSend) {
-  if (!entry.composerDraft) return false;
-  const scope = `${entry.environmentId}/${entry.threadId}`;
-  const persistence = draftStore(client.localStateDirectory, () => {});
-  await persistence.ready;
-  const current = drafts.get(scope) ?? persistence.get(scope) ?? entry.composerDraft;
-  const next = settleSentDraft(current, entry.composerDraft);
-  drafts.set(scope, next);
-  persistence.save(scope, next);
-  draftOwners.get(scope)?.apply(next);
-  await persistence.flush();
-  return true;
-}
+export { settleRecoveredSend } from "./draft-ownership.ts";
 
 function ThreadConversation(
   props: FeatureProps & {
@@ -392,12 +378,9 @@ function ThreadConversation(
     attachments: attachments(),
     freshContext: freshContext(),
   });
-  const saveDraft = () => {
-    const value = captureDraft();
-    drafts.set(props.scope, value);
-    persistence.save(props.scope, value);
-  };
-  const setText = (value: string) => {
+  const ownership = createDraftOwnership(props.scope, persistence, initialDraft);
+  const saveDraft = () => ownership.update(captureDraft());
+  const setText = (value: string, persist = true) => {
     promptHistory.onEdit(value);
     lastComposerText = value;
     composer?.setText(value);
@@ -409,16 +392,16 @@ function ThreadConversation(
       attachments: attachments(),
       freshContext: freshContext(),
     };
-    drafts.set(props.scope, next);
-    persistence.save(props.scope, next);
+    ownership.update(next, persist);
   };
   const owner = {
-    apply: (value: Draft) => {
+    invalidate: ownership.invalidate,
+    apply: (value: Draft, persist = true) => {
       setMentions(value.mentions);
       setContext(value.context);
       setAttachments(value.attachments);
       setFreshContext(value.freshContext);
-      setText(value.text);
+      setText(value.text, persist);
     },
     settled: () => setSending(false),
   };
@@ -507,7 +490,7 @@ function ThreadConversation(
     })
     .catch(() => undefined);
   onCleanup(() => {
-    if (drafts.has(props.scope) || hasDraftContent(captureDraft())) saveDraft();
+    if (ownership.changed(captureDraft())) saveDraft();
     void persistence
       .flush()
       .catch((error: unknown) =>
@@ -1720,13 +1703,14 @@ function ThreadConversation(
           : {}),
       });
       const current = drafts.get(scope) ?? captured;
-      const unchanged = current.text === captured.text;
-      const next = settleSentDraft(current, captured);
+      const unchanged = JSON.stringify(current) === JSON.stringify(captured);
+      const next = unchanged
+        ? (persistence.get(scope) ?? settleSentDraft(current, captured))
+        : current;
       drafts.set(scope, next);
-      persistence.save(scope, next);
       skippedCompactions.delete(scope);
       setSkipCompaction(false);
-      draftOwners.get(scope)?.apply(next);
+      if (unchanged) draftOwners.get(scope)?.apply(next, false);
       if (!disposed && unchanged) goBottom();
     } finally {
       pendingSends.delete(scope);
@@ -2440,6 +2424,16 @@ function ThreadConversation(
             onMouseDown={() => props.ui.pendingSendActions?.()}
           >
             Unconfirmed send · check Pending sends before sending again
+          </text>
+        </Show>
+        <Show when={props.state()?.invalidPendingSends?.length}>
+          <text
+            selectable={false}
+            fg={theme.warning}
+            wrapMode="word"
+            onMouseDown={() => props.ui.pendingSendActions?.()}
+          >
+            Unreadable recovery records · inspect Pending sends before retrying retained drafts
           </text>
         </Show>
         <Show when={mentions().some((record) => draft().includes(`@${record.path}`))}>

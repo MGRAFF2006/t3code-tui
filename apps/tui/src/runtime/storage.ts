@@ -22,6 +22,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
+import { acquirePrivateStateLock } from "../connections/state-lock.ts";
 
 const CatalogJson = Schema.fromJsonString(ConnectionCatalogDocument);
 const decodeCatalog = Schema.decodeSync(CatalogJson);
@@ -53,8 +54,11 @@ export async function createStorage(configDir: string) {
     Effect.tryPromise({
       try: () => {
         const next = pending.then(async () => {
-          const lockPath = `${filename}.lock`;
-          const lock = await NodeFSP.open(lockPath, "wx", 0o600);
+          const lock = await acquirePrivateStateLock(
+            `${filename}.lock.sqlite`,
+            "Saved TUI connections are busy in another terminal. Retry after its operation finishes.",
+            { wait: false },
+          );
           try {
             let current = EMPTY_CONNECTION_CATALOG_DOCUMENT;
             try {
@@ -76,8 +80,7 @@ export async function createStorage(configDir: string) {
               await NodeFSP.rm(temporary, { force: true });
             }
           } finally {
-            await lock.close();
-            await NodeFSP.rm(lockPath);
+            lock.close();
           }
         });
         pending = next.catch(() => undefined);
@@ -87,8 +90,8 @@ export async function createStorage(configDir: string) {
         new ConnectionTransientError({
           reason: "remote-unavailable",
           detail:
-            error instanceof Error && "code" in error && error.code === "EEXIST"
-              ? `Saved TUI connections are locked. Retry after other TUI writes finish. If no TUI is running, remove ${filename}.lock.`
+            error instanceof Error && error.message.startsWith("Saved TUI connections are busy")
+              ? error.message
               : `Could not save TUI connections at ${filename}. Check its permissions and available disk space.`,
         }),
     });

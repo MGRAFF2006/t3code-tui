@@ -10,7 +10,8 @@ import {
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Schema from "effect/Schema";
-import { hasDraftContent, type Draft } from "./draft.ts";
+import { hasDraftContent, settleSentDraft, type Draft } from "./draft.ts";
+import { acquirePrivateStateLock } from "../connections/state-lock.ts";
 
 const LocalAttachment = Schema.Struct({
   id: Schema.String.check(Schema.isMaxLength(128)),
@@ -88,36 +89,6 @@ async function readDocument(filename: string): Promise<Document> {
   return value;
 }
 
-async function acquireLock(filename: string) {
-  const handle = await NodeFSP.open(filename, "a", 0o600);
-  await handle.close();
-  const Database = process.versions.bun
-    ? (await import("bun:sqlite")).Database
-    : (await import("node:sqlite")).DatabaseSync;
-  // This permanent file is never unlinked: the OS releases its transaction lock on exit.
-  for (let attempt = 0; attempt < 200; attempt++) {
-    const database = new Database(filename);
-    try {
-      database.exec("PRAGMA busy_timeout = 0; BEGIN EXCLUSIVE;");
-      return database;
-    } catch (error) {
-      database.close();
-      if (
-        !(error instanceof Error) ||
-        !(
-          ("errcode" in error && error.errcode === 5) ||
-          ("code" in error && error.code === "SQLITE_BUSY")
-        )
-      )
-        throw error;
-    }
-    await Effect.runPromise(Effect.sleep("25 millis"));
-  }
-  throw new Error(
-    "TUI drafts are busy in another terminal. Your unsaved prompt is still available; retry saving.",
-  );
-}
-
 export function createDraftStore(directory: string, onError: (message: string) => void) {
   const filename = NodePath.join(directory, "drafts.json");
   let document = empty();
@@ -155,7 +126,7 @@ export function createDraftStore(directory: string, onError: (message: string) =
         const changed = new Map(pending);
         const operations = [...stashOperations];
         await NodeFSP.mkdir(directory, { recursive: true, mode: 0o700 });
-        const lock = await acquireLock(`${filename}.lock.sqlite`);
+        const lock = await acquirePrivateStateLock(`${filename}.lock.sqlite`);
         const temporary = `${filename}.${process.pid}.${ordinal++}.tmp`;
         let next: Document;
         try {
@@ -204,8 +175,59 @@ export function createDraftStore(directory: string, onError: (message: string) =
       ),
     );
   };
+  const transform = (
+    scope: string,
+    apply: (value: Draft | undefined) => Draft | undefined,
+    discardPending: boolean,
+  ) => {
+    writing = writing
+      .catch(() => undefined)
+      .then(async () => {
+        await ready;
+        const before = pending.get(scope);
+        await NodeFSP.mkdir(directory, { recursive: true, mode: 0o700 });
+        const lock = await acquirePrivateStateLock(`${filename}.lock.sqlite`);
+        const temporary = `${filename}.${process.pid}.${ordinal++}.tmp`;
+        try {
+          const latest = await readDocument(filename);
+          const value = apply(latest.drafts[scope]);
+          const next = { ...latest, drafts: { ...latest.drafts } };
+          if (value && hasDraftContent(value)) next.drafts[scope] = value;
+          else delete next.drafts[scope];
+          await NodeFSP.writeFile(temporary, JSON.stringify(next), { mode: 0o600, flag: "wx" });
+          await NodeFSP.rename(temporary, filename);
+          if (pending.get(scope) === before) {
+            pending.delete(scope);
+            const local = discardPending ? undefined : before && apply(before);
+            if (local && hasDraftContent(local)) pending.set(scope, local);
+          }
+          document = {
+            ...next,
+            drafts: mergeDrafts(next.drafts, pending),
+            stash: stashOperations.reduce((entries, operation) => operation(entries), next.stash),
+          };
+          notify();
+        } finally {
+          try {
+            await NodeFSP.rm(temporary, { force: true });
+          } finally {
+            lock.close();
+          }
+        }
+      });
+    return writing;
+  };
   return {
     ready,
+    settle: (scope: string, sent: Draft) =>
+      transform(
+        scope,
+        (value) =>
+          value &&
+          (JSON.stringify(value) === JSON.stringify(sent) ? settleSentDraft(value, sent) : value),
+        false,
+      ),
+    clear: (scope: string) => transform(scope, () => undefined, true),
     refresh: () => {
       writing = writing
         .catch(() => undefined)

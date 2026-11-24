@@ -117,7 +117,7 @@ Open a ZIP or JAR in Files to browse its folders, search entries and read text o
 
 Workspace also exposes named terminal sessions, device hosts and device actions. **Open workspace in environment editor**, and the corresponding Files action, launch an available editor on the computer hosting that environment. External-viewer actions download a bounded private copy and open it on this computer.
 
-Capabilities and permissions come from the destination environment and provider. The terminal uses T3's existing client commands and contracts; it does not make unsupported provider operations available by pretending they succeeded. Unsaved file edits require an explicit discard before navigation. Resizing preserves an open editor.
+Capabilities and permissions come from the destination environment and provider. The terminal uses T3's existing client commands and contracts; it does not make unsupported provider operations available by pretending they succeeded. Unsaved file edits require an explicit discard before navigation. Resizing preserves an open editor. Saving requires a server that advertises conditional saves; older servers remain read-only. Concurrent saves through the same server reject stale contents and keep your unsaved edit. Direct filesystem edits and separate server processes cannot participate in that save lock, so concurrent external writes can still race a save.
 
 ## Graphics and newer terminals
 

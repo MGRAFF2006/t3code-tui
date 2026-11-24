@@ -14,6 +14,7 @@ describe("workspace editing", () => {
     contents: "original\n",
     byteLength: 9,
     truncated: false,
+    supportsConditionalWrite: true,
   };
 
   it("refuses incomplete previews, external changes and paths outside the workspace", () => {
@@ -23,6 +24,12 @@ describe("workspace editing", () => {
     );
     expect(fileSaveProblem({ ...original, truncated: true }, original)).toContain("text limit");
     expect(fileSaveProblem(original, { ...original, truncated: true })).toContain("text limit");
+    expect(
+      fileSaveProblem({ ...original, supportsConditionalWrite: undefined }, original),
+    ).toContain("read-only");
+    expect(
+      fileSaveProblem(original, { ...original, supportsConditionalWrite: undefined }),
+    ).toContain("read-only");
     for (const relativePath of [
       "/etc/hosts",
       "C:\\Windows\\system.ini",

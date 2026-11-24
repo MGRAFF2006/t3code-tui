@@ -1,6 +1,8 @@
 // @effect-diagnostics nodeBuiltinImport:off -- Unconfirmed messages live in the terminal's private local state directory.
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
+import * as NodeCrypto from "node:crypto";
+import { acquirePrivateStateLock } from "../connections/state-lock.ts";
 import * as Schema from "effect/Schema";
 import {
   ChatAttachment,
@@ -44,6 +46,7 @@ const PendingSend = Schema.Struct({
   createdAt: Schema.String,
   steps: Schema.Array(SendInput).check(Schema.isMinLength(1)),
   nextStep: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  attempted: Schema.optionalKey(Schema.Boolean),
   composerDraft: Schema.optionalKey(DraftSchema),
 });
 export type PendingSend = typeof PendingSend.Type;
@@ -54,6 +57,13 @@ const Document = Schema.fromJsonString(
 const decode = Schema.decodeSync(Document);
 const encode = Schema.encodeSync(Document);
 
+export interface InvalidPendingSend {
+  readonly file: string;
+  readonly error: string;
+  readonly environmentId?: string;
+  readonly threadId?: string;
+}
+
 export async function createSendOutbox(configDir: string) {
   const directory = NodePath.join(configDir, "pending-sends");
   await preparePrivateDirectory(directory);
@@ -61,6 +71,7 @@ export async function createSendOutbox(configDir: string) {
   const listeners = new Set<(entries: readonly PendingSend[]) => void>();
   const active = new Set<string>();
   let entries: readonly PendingSend[] = [];
+  let invalid: readonly InvalidPendingSend[] = [];
   async function read(id: string): Promise<PendingSend>;
   async function read(id: string, allowMissing: true): Promise<PendingSend | null>;
   async function read(id: string, allowMissing = false) {
@@ -68,7 +79,14 @@ export async function createSendOutbox(configDir: string) {
     if (contents === null && allowMissing) return null;
     if (contents === null)
       throw new Error("This pending send has already been resolved or discarded.");
-    const entry = decode(contents).send;
+    let entry: PendingSend;
+    try {
+      entry = decode(contents).send;
+    } catch {
+      throw new Error(
+        `The pending-send record at ${path(id)} cannot be decoded. It was left unchanged.`,
+      );
+    }
     if (
       entry.id !== id ||
       entry.nextStep > entry.steps.length ||
@@ -82,14 +100,42 @@ export async function createSendOutbox(configDir: string) {
   }
   async function refresh() {
     const files = await NodeFSP.readdir(directory);
+    const bad: InvalidPendingSend[] = [];
     const next = await Promise.all(
       files
         .filter((file) => file.endsWith(".json"))
-        .map((file) => read(decodeURIComponent(file.slice(0, -5)), true)),
+        .map(async (file) => {
+          const filename = NodePath.join(directory, file);
+          try {
+            const id = decodeURIComponent(file.slice(0, -5));
+            if (path(id) !== filename)
+              throw new Error("The pending-send filename is not canonical. It was left unchanged.");
+            return await read(id, true);
+          } catch (error) {
+            let scope: { environmentId?: string; threadId?: string } = {};
+            try {
+              const raw = JSON.parse((await readPrivateFile(filename)) ?? "null");
+              if (
+                typeof raw?.send?.environmentId === "string" &&
+                typeof raw?.send?.threadId === "string"
+              )
+                scope = { environmentId: raw.send.environmentId, threadId: raw.send.threadId };
+            } catch {
+              /* The invalid bytes remain available for explicit inspection. */
+            }
+            bad.push({
+              file: filename,
+              error: error instanceof Error ? error.message : String(error),
+              ...scope,
+            });
+            return null;
+          }
+        }),
     );
     entries = next
       .filter((entry) => entry !== null)
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
+    invalid = bad.sort((a, b) => a.file.localeCompare(b.file));
     for (const listener of listeners) listener(entries);
     return entries;
   }
@@ -97,39 +143,180 @@ export async function createSendOutbox(configDir: string) {
     await writePrivateFile(path(entry.id), encode({ version: 1, send: entry }));
     await refresh();
   }
-  async function discard(id: string) {
-    if (active.has(id)) throw new Error("Wait for this pending-send operation to finish.");
+  const scopeKey = (environmentId: string, threadId: string) =>
+    JSON.stringify([environmentId, threadId]);
+  async function withScope<A>(environmentId: string, threadId: string, use: () => Promise<A>) {
+    const scope = scopeKey(environmentId, threadId);
+    if (active.has(scope))
+      throw new Error(
+        "Wait for this pending-send operation to finish; it is already being checked.",
+      );
+    active.add(scope);
+    try {
+      const digest = NodeCrypto.createHash("sha256").update(scope).digest("hex");
+      const lock = await acquirePrivateStateLock(
+        NodePath.join(directory, `${digest}.lock.sqlite`),
+        "A message is already being prepared or checked for this conversation in another terminal.",
+        { wait: false },
+      );
+      try {
+        return await use();
+      } finally {
+        lock.close();
+      }
+    } finally {
+      active.delete(scope);
+    }
+  }
+  const remove = async (id: string) => {
     await NodeFSP.rm(path(id), { force: true });
     await refresh();
+  };
+  async function add(entry: PendingSend) {
+    await refresh();
+    if (entries.some((existing) => existing.id === entry.id))
+      throw new Error("This send is already pending.");
+    if (
+      entries.some(
+        (existing) =>
+          existing.environmentId === entry.environmentId && existing.threadId === entry.threadId,
+      )
+    )
+      throw new Error(
+        "This conversation has an unconfirmed send. Open Pending sends to check or retry the original message.",
+      );
+    if (
+      invalid.some(
+        (existing) =>
+          existing.file === path(entry.id) ||
+          (existing.environmentId === entry.environmentId && existing.threadId === entry.threadId),
+      )
+    )
+      throw new Error(
+        "This conversation has an unreadable pending send. Open Pending sends to inspect its recovery file.",
+      );
+    await save(entry);
+  }
+  async function dispatch(
+    id: string,
+    execute: (
+      entry: PendingSend,
+      input: PendingSendInput,
+      markAttempted: () => Promise<void>,
+    ) => Promise<void>,
+    settle: (entry: PendingSend) => Promise<void> = async () => {},
+  ) {
+    let entry = await read(id);
+    for (let index = entry.nextStep; index < entry.steps.length; index += 1) {
+      await execute(entry, entry.steps[index]!, async () => {
+        entry = Object.assign({}, entry, { attempted: true });
+        await save(entry);
+      });
+      entry = Object.assign({}, entry, { nextStep: index + 1 });
+      await save(entry);
+    }
+    await settle(entry);
+    await remove(id);
+    return entry;
+  }
+  async function operate<A>(id: string, use: (entry: PendingSend) => Promise<A>) {
+    const initial = await read(id);
+    return withScope(initial.environmentId, initial.threadId, async () => use(await read(id)));
   }
   await refresh();
   return {
     get: () => entries,
+    invalid: () => invalid,
     refresh,
     read,
-    add: async (entry: PendingSend) => {
-      if (entries.some((existing) => existing.id === entry.id))
-        throw new Error("This send is already pending.");
-      await save(entry);
-    },
-    discard,
-    dispatch: async (
-      id: string,
-      execute: (entry: PendingSend, input: PendingSendInput) => Promise<void>,
-    ) => {
-      if (active.has(id)) throw new Error("This pending send is already being checked.");
-      active.add(id);
-      try {
-        const entry = await read(id);
-        for (let index = entry.nextStep; index < entry.steps.length; index += 1) {
-          await execute({ ...entry, nextStep: index }, entry.steps[index]!);
-          await save({ ...entry, nextStep: index + 1 });
-        }
-        await NodeFSP.rm(path(id), { force: true });
+    reserve: <A>(
+      environmentId: string,
+      threadId: string,
+      prepare: (operations: { add: typeof add; dispatch: typeof dispatch }) => Promise<A>,
+    ) =>
+      withScope(environmentId, threadId, async () => {
         await refresh();
-      } finally {
-        active.delete(id);
-      }
+        if (
+          entries.some(
+            (entry) => entry.environmentId === environmentId && entry.threadId === threadId,
+          )
+        )
+          throw new Error(
+            "This conversation has an unconfirmed send. Open Pending sends to check or retry the original message.",
+          );
+        if (
+          invalid.some(
+            (entry) => entry.environmentId === environmentId && entry.threadId === threadId,
+          )
+        )
+          throw new Error(
+            "This conversation has an unreadable pending send. Open Pending sends to inspect its recovery file.",
+          );
+        return prepare({ add, dispatch });
+      }),
+    add: (entry: PendingSend) => withScope(entry.environmentId, entry.threadId, () => add(entry)),
+    discard: (id: string) => operate(id, () => remove(id)),
+    dispatch: (
+      id: string,
+      execute: Parameters<typeof dispatch>[1],
+      settle: Parameters<typeof dispatch>[2] = async () => {},
+    ) => operate(id, () => dispatch(id, execute, settle)),
+    retry: (
+      id: string,
+      accepted: (entry: PendingSend) => Promise<boolean>,
+      prepare: (entry: PendingSend) => Promise<PendingSend>,
+      prepared: (entry: PendingSend) => void,
+      execute: Parameters<typeof dispatch>[1],
+      settle: Parameters<typeof dispatch>[2],
+    ) =>
+      operate(id, async (entry) => {
+        if (entry.nextStep < entry.steps.length) {
+          if (await accepted(entry)) await save({ ...entry, nextStep: entry.steps.length });
+          else {
+            const next = await prepare(entry);
+            await save(next);
+            prepared(next);
+          }
+        }
+        await dispatch(id, execute, settle);
+        return entry;
+      }),
+    reconcile: (
+      id: string,
+      accepted: (entry: PendingSend) => Promise<boolean>,
+      settle: Parameters<typeof dispatch>[2],
+    ) =>
+      operate(id, async (entry) => {
+        if (entry.nextStep < entry.steps.length && !(await accepted(entry))) return false;
+        const completed = { ...entry, nextStep: entry.steps.length };
+        await save(completed);
+        if (settle) await settle(completed);
+        await remove(id);
+        return entry;
+      }),
+    inspectInvalid: async (file: string) => {
+      await refresh();
+      if (!invalid.some((entry) => entry.file === file))
+        throw new Error("This unreadable record is no longer present.");
+      return (await readPrivateFile(file)) ?? "The record no longer exists.";
+    },
+    moveAside: async (file: string) => {
+      await refresh();
+      const original = invalid.find((entry) => entry.file === file);
+      if (!original) throw new Error("This unreadable record is no longer present.");
+      return withScope(
+        original.environmentId ?? "invalid-file",
+        original.threadId ?? file,
+        async () => {
+          await refresh();
+          if (!invalid.some((entry) => entry.file === file))
+            throw new Error("This record changed. Inspect it again before moving it aside.");
+          // link refuses to overwrite an earlier recovery copy.
+          await NodeFSP.link(file, `${file}.invalid`);
+          await NodeFSP.unlink(file);
+          await refresh();
+        },
+      );
     },
     subscribe: (listener: (value: readonly PendingSend[]) => void) => {
       listeners.add(listener);

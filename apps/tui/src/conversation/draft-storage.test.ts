@@ -33,6 +33,14 @@ it.effect(
             const results = await Promise.allSettled([first.flush(), second.flush()]);
             for (const result of results) if (result.status === "rejected") throw result.reason;
           });
+          second.save("environment-a/thread-a", draft("Newer draft in another window"));
+          yield* Effect.promise(second.flush);
+          yield* Effect.promise(() =>
+            first.settle("environment-a/thread-a", draft("Original prompt")),
+          );
+          const settled = createDraftStore(directory, (message) => errors.push(message));
+          yield* Effect.promise(() => settled.ready);
+          expect(settled.get("environment-a/thread-a")?.text).toBe("Newer draft in another window");
           const reopened = createDraftStore(directory, (message) => errors.push(message));
           reopened.save("environment-a/thread-a", draft("Typed while loading"));
           yield* Effect.promise(() => reopened.ready);

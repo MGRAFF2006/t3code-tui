@@ -68,10 +68,29 @@ describe("terminal uncertain-send outbox", () => {
           const reopened = yield* Effect.promise(() => createSendOutbox(directory));
           expect(reopened.get()).toEqual([{ ...original, nextStep: 1 }]);
           yield* Effect.promise(() =>
-            reopened.dispatch(original.id, async (saved, command) => {
-              expect(saved.environmentId).toBe("destination");
-              attempts.push(command);
-            }),
+            expect(
+              reopened.dispatch(
+                original.id,
+                async (saved, command) => {
+                  expect(saved.environmentId).toBe("destination");
+                  attempts.push(command);
+                },
+                async () => {
+                  throw new Error("Draft disk unavailable");
+                },
+              ),
+            ).rejects.toThrow("Draft disk unavailable"),
+          );
+          const accepted = yield* Effect.promise(() => createSendOutbox(directory));
+          expect(accepted.get()[0]?.nextStep).toBe(original.steps.length);
+          yield* Effect.promise(() =>
+            accepted.dispatch(
+              original.id,
+              async () => {
+                throw new Error("Accepted message must not dispatch again");
+              },
+              async () => {},
+            ),
           );
           expect(attempts).toEqual([original.steps[0], original.steps[1], original.steps[1]]);
           expect((yield* Effect.promise(() => createSendOutbox(directory))).get()).toEqual([]);
@@ -91,6 +110,7 @@ describe("terminal uncertain-send outbox", () => {
           const outbox = yield* Effect.promise(() => createSendOutbox(directory));
           const original = entry();
           yield* Effect.promise(() => outbox.add(original));
+          const otherWindow = yield* Effect.promise(() => createSendOutbox(directory));
           yield* Effect.promise(() =>
             expect(
               outbox.dispatch(original.id, async () => {
@@ -100,6 +120,17 @@ describe("terminal uncertain-send outbox", () => {
                 await expect(outbox.dispatch(original.id, async () => {})).rejects.toThrow(
                   "already being checked",
                 );
+                await expect(otherWindow.discard(original.id)).rejects.toThrow("another terminal");
+                await expect(otherWindow.dispatch(original.id, async () => {})).rejects.toThrow(
+                  "another terminal",
+                );
+                await expect(
+                  otherWindow.reconcile(
+                    original.id,
+                    async () => true,
+                    async () => {},
+                  ),
+                ).rejects.toThrow("another terminal");
                 throw new Error("Access revoked");
               }),
             ).rejects.toThrow("Access revoked"),
@@ -109,6 +140,50 @@ describe("terminal uncertain-send outbox", () => {
           expect((yield* Effect.promise(() => NodeFSP.stat(file))).mode & 0o777).toBe(0o600);
           yield* Effect.promise(() => outbox.discard(original.id));
           expect((yield* Effect.promise(() => createSendOutbox(directory))).get()).toEqual([]);
+        }),
+      ),
+  );
+
+  it.effect(
+    "reserves the conversation before asynchronous preparation without blocking another conversation",
+    () =>
+      withDirectory((directory) =>
+        Effect.gen(function* () {
+          const first = yield* Effect.promise(() => createSendOutbox(directory));
+          const second = yield* Effect.promise(() => createSendOutbox(directory));
+          const started = Promise.withResolvers<void>();
+          const release = Promise.withResolvers<void>();
+          let prepared = 0;
+          let dispatched = 0;
+          const sending = first.reserve("destination", "thread", async (reserved) => {
+            prepared++;
+            started.resolve();
+            await release.promise;
+            await reserved.add(entry());
+            await reserved.dispatch(
+              "send",
+              async () => {
+                dispatched++;
+              },
+              async () => {},
+            );
+          });
+          yield* Effect.promise(() => started.promise);
+          yield* Effect.promise(() =>
+            expect(
+              second.reserve("destination", "thread", async () => {
+                prepared++;
+              }),
+            ).rejects.toThrow("another terminal"),
+          );
+          yield* Effect.promise(() =>
+            second.reserve("destination", "unrelated-thread", async () => {}),
+          );
+          release.resolve();
+          yield* Effect.promise(() => sending);
+          expect(prepared).toBe(1);
+          expect(dispatched).toBe(2);
+          expect(yield* Effect.promise(second.refresh)).toEqual([]);
         }),
       ),
   );
@@ -139,8 +214,12 @@ describe("terminal uncertain-send outbox", () => {
           ]);
           const filename = NodePath.join(directory, "pending-sends", "other.json");
           yield* Effect.promise(() => NodeFSP.writeFile(filename, "invalid pending-send record"));
-          yield* Effect.promise(() => expect(createSendOutbox(directory)).rejects.toThrow());
-          expect(yield* Effect.promise(() => NodeFSP.readFile(filename, "utf8"))).toBe(
+          const damaged = yield* Effect.promise(() => createSendOutbox(directory));
+          expect(damaged.invalid()).toEqual([expect.objectContaining({ file: filename })]);
+          expect(damaged.get()).toEqual([]);
+          yield* Effect.promise(() => damaged.moveAside(filename));
+          expect(damaged.invalid()).toEqual([]);
+          expect(yield* Effect.promise(() => NodeFSP.readFile(`${filename}.invalid`, "utf8"))).toBe(
             "invalid pending-send record",
           );
         }),

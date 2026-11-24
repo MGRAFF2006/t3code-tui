@@ -1,9 +1,9 @@
 // @effect-diagnostics nodeBuiltinImport:off -- Local terminal preferences share the existing private client state directory.
-import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { TimestampFormat, ToolCallVisibility } from "@t3tools/contracts/settings";
+import { acquirePrivateStateLock } from "../connections/state-lock.ts";
 import {
   preparePrivateDirectory,
   readPrivateFile,
@@ -87,16 +87,11 @@ export async function createPreferences(configDir: string) {
   let pending: Promise<unknown> = Promise.resolve();
   function change(transform: (current: TuiPreferences) => TuiPreferences): Promise<TuiPreferences> {
     const save = pending.then(async () => {
-      const lockPath = `${filename}.lock`;
-      let lock;
-      try {
-        lock = await NodeFSP.open(lockPath, "wx", 0o600);
-      } catch (error) {
-        throw new Error(
-          `Could not lock terminal preferences at ${filename}. Retry after other TUI writes finish.`,
-          { cause: error },
-        );
-      }
+      const lock = await acquirePrivateStateLock(
+        `${filename}.lock.sqlite`,
+        `Could not lock terminal preferences at ${filename}. Retry after other TUI writes finish.`,
+        { wait: false },
+      );
       try {
         const latest = await read();
         const next = decodePreferences(transform(latest));
@@ -105,8 +100,7 @@ export async function createPreferences(configDir: string) {
         for (const listener of listeners) listener(next);
         return next;
       } finally {
-        await lock.close();
-        await NodeFSP.rm(lockPath, { force: true });
+        lock.close();
       }
     });
     pending = save.catch(() => undefined);

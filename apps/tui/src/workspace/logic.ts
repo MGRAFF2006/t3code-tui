@@ -50,6 +50,9 @@ export function fileSaveProblem(original: ProjectReadFileResult, latest: Project
   ) {
     return "Files outside the workspace are read-only.";
   }
+  if (!original.supportsConditionalWrite || !latest.supportsConditionalWrite) {
+    return "This server does not support conditional saves. Files are read-only here until the server is updated.";
+  }
   if (original.contents !== latest.contents) {
     return "The file changed on disk. Keep your draft open and reload the file before saving.";
   }

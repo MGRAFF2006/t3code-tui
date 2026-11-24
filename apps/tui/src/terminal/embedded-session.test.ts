@@ -98,4 +98,94 @@ describe("embedded terminal attachment", () => {
     expect(stop).toHaveBeenCalledTimes(1);
     expect(onEvent).toHaveBeenCalledTimes(1);
   });
+  it.each(["exit", "replacement", "failed-old-write"])(
+    "drops old paste chunks and query replies across %s while allowing new shell input",
+    async (transition) => {
+      let emit!: (event: unknown) => void;
+      let release!: () => void;
+      let started!: () => void;
+      let finished!: () => void;
+      const blocked = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const firstWrite = new Promise<void>((resolve) => {
+        started = resolve;
+      });
+      const newWrite = new Promise<void>((resolve) => {
+        finished = resolve;
+      });
+      const received: string[] = [];
+      const onError = vi.fn();
+      const invoke = vi.fn(async (method: string, input: unknown) => {
+        if (method !== WS_METHODS.terminalWrite) return;
+        const { data } = input as { data: string };
+        received.push(data);
+        if (received.length === 1) {
+          started();
+          await blocked;
+          if (transition === "failed-old-write") throw new Error("old shell closed");
+        }
+        if (data === "new shell") finished();
+      });
+      const terminal = attachEmbeddedTerminal({
+        client: {
+          captureTransport: () => ({
+            invoke,
+            stream: (_method: string, _input: unknown, onEvent: (event: unknown) => void) => {
+              emit = onEvent;
+              return () => {};
+            },
+          }),
+        } as unknown as Pick<TuiClient, "captureTransport">,
+        threadId: "owned-thread",
+        terminalId: "shell",
+        cwd: "/owned/repo",
+        cols: 80,
+        rows: 24,
+        onEvent: () => {},
+        onError,
+      });
+      const snapshot = {
+        threadId: "owned-thread",
+        terminalId: "shell",
+        cwd: "/owned/repo",
+        worktreePath: null,
+        pid: 1,
+        status: "running",
+        history: "",
+        cols: 80,
+        rows: 24,
+        exitCode: null,
+        exitSignal: null,
+        label: "shell",
+        updatedAt: "2026-11-24T12:00:00Z",
+      };
+      emit({ type: "snapshot", snapshot });
+      terminal.write(Buffer.from("first"));
+      await firstWrite;
+      terminal.write(Buffer.from("\x1b[200~" + "old paste".repeat(20_000) + "\x1b[201~"));
+      terminal.write(Buffer.from("old query reply"), true);
+      if (transition === "exit") {
+        emit({
+          type: "exited",
+          threadId: snapshot.threadId,
+          terminalId: snapshot.terminalId,
+          exitCode: 0,
+          exitSignal: null,
+        });
+      }
+      emit({
+        type: "restarted",
+        threadId: snapshot.threadId,
+        terminalId: snapshot.terminalId,
+        snapshot: { ...snapshot, pid: 2 },
+      });
+      terminal.write(Buffer.from("new shell"));
+      release();
+      await newWrite;
+      expect(received).toEqual(["first", "new shell"]);
+      expect(onError).not.toHaveBeenCalled();
+      terminal.dispose();
+    },
+  );
 });

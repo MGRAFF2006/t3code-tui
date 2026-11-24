@@ -1,6 +1,6 @@
 import { scrollbarOptions } from "../ui/scroll.ts";
 import { WS_METHODS } from "@t3tools/contracts";
-import { createEffect, createMemo, createSignal, For, Show, type Accessor } from "solid-js";
+import { createEffect, createMemo, createSignal, For, Show, on, type Accessor } from "solid-js";
 import { request } from "../rpc/request.ts";
 import { theme } from "../theme/index.ts";
 import { useActiveKeyboard } from "../ui/keyboard.ts";
@@ -32,13 +32,15 @@ export function TerminalsPanel(
   const failure = () =>
     metadata()?.error ??
     (connection() !== "connected" ? "Terminal status is unavailable while disconnected." : "");
-  createEffect(() => {
-    const destination = environment();
-    const id = thread();
-    if (!props.visible || !destination || !id) return;
-    setSelected(0);
-    setAttached(props.requestedTerminalId);
-  });
+  createEffect(
+    on(
+      () => [environment(), thread(), props.requestedTerminalId] as const,
+      () => {
+        setSelected(0);
+        setAttached(props.requestedTerminalId);
+      },
+    ),
+  );
   function destination() {
     const environmentId = environment();
     const threadId = thread();

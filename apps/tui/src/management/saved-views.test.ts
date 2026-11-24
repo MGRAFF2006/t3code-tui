@@ -5,6 +5,7 @@ import * as NodePath from "node:path";
 import { describe, expect, it } from "vite-plus/test";
 import { EnvironmentId, ProjectId } from "@t3tools/contracts";
 import { createSavedViews, savedViewProject, type TuiSavedViewInput } from "./saved-views.ts";
+import { acquirePrivateStateLock } from "../connections/state-lock.ts";
 import {
   v2Project,
   v2ShellSnapshot,
@@ -86,10 +87,16 @@ describe("private saved list views", () => {
       await store.save(input, "My work");
       const filename = NodePath.join(directory, "saved-views.json");
       const saved = await NodeFSP.readFile(filename, "utf8");
-      await NodeFSP.writeFile(`${filename}.lock`, "other writer");
-      await expect(store.save(input, "New view")).rejects.toThrow("busy");
-      expect(await NodeFSP.readFile(filename, "utf8")).toBe(saved);
-      await NodeFSP.rm(`${filename}.lock`);
+      const lock = await acquirePrivateStateLock(`${filename}.lock.sqlite`);
+      try {
+        await expect(store.save(input, "New view")).rejects.toThrow("busy");
+        expect(await NodeFSP.readFile(filename, "utf8")).toBe(saved);
+      } finally {
+        lock.close();
+      }
+      await NodeFSP.writeFile(`${filename}.lock`, "abandoned legacy writer");
+      await store.save(input, "New view");
+      expect(await NodeFSP.readFile(`${filename}.lock`, "utf8")).toBe("abandoned legacy writer");
       await NodeFSP.writeFile(filename, "{broken json");
       await expect(store.list()).rejects.toThrow("left unchanged");
       await expect(store.save(input, "New view")).rejects.toThrow("left unchanged");

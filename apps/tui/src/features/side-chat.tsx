@@ -12,7 +12,7 @@ import { presentThreadShell } from "@t3tools/client-runtime/state/models";
 import { threadRuntimeIsActive } from "@t3tools/client-runtime/state/shell";
 import { request } from "../rpc/request.ts";
 import type { FeatureProps } from "../ui/controller.ts";
-import { draftStore } from "../conversation/draft-storage.ts";
+import { clearConversationDraft } from "../conversation/draft-ownership.ts";
 import { theme } from "../theme/index.ts";
 
 export function sideChatParent(thread: Pick<OrchestrationV2ThreadShell, "id" | "lineage">) {
@@ -204,18 +204,7 @@ export function createSideChats(props: FeatureProps & { navigationVersion?: () =
             commandId: CommandId.make(SecureRandom.uuidV4Unsafe()),
             threadId: thread.id,
           });
-          const store = draftStore(props.client.localStateDirectory, (message) =>
-            props.ui.notify(message, true),
-          );
-          await store.ready;
-          store.save(`${captured.environment}/${thread.id}`, {
-            text: "",
-            mentions: [],
-            context: [],
-            attachments: [],
-            freshContext: false,
-          });
-          await store.flush();
+          await clearConversationDraft(props.client, `${captured.environment}/${thread.id}`);
           if (
             props.state()?.environmentId === captured.environment &&
             version === props.navigationVersion?.() &&

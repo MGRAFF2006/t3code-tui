@@ -2318,6 +2318,22 @@ export function App(props: { client: TuiClient | null; demo?: boolean; onExit: (
               •••
             </text>
           </box>
+          <Show when={props.client && (state()?.invalidPendingSends?.length ?? 0) > 0}>
+            <box height={1} flexShrink={0} flexDirection="row" gap={1} paddingX={1}>
+              <text fg={theme.warning} height={1} truncate flexGrow={1} minWidth={0}>
+                Unreadable send recovery files were preserved.
+              </text>
+              <text
+                selectable={false}
+                fg={theme.primary}
+                height={1}
+                flexShrink={0}
+                onMouseDown={() => ui.pendingSendActions?.()}
+              >
+                Inspect…
+              </text>
+            </box>
+          </Show>
           <Show when={props.client && state()?.error && state()?.connection !== "connected"}>
             <box height={1} flexShrink={0} flexDirection="row" gap={1} paddingX={1}>
               <text fg={theme.error} height={1} truncate flexGrow={1} minWidth={0}>

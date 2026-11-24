@@ -238,7 +238,7 @@ export function WorkspacePanel(
       <TerminalsPanel
         {...props}
         cwd={cwd}
-        visible={tab() === "terminals"}
+        visible={props.visible !== false && tab() === "terminals"}
         requestedTerminalId={props.requestedTerminalId}
       />
       <DevicesPanel {...props} visible={tab() === "devices"} />

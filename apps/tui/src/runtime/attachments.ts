@@ -239,6 +239,13 @@ export function createLocalAttachmentUploads<R, E>(
     return attachment;
   });
   return {
+    verify: (environmentId: EnvironmentId, attachmentId: string) =>
+      verifyPersistedAttachmentUpload({
+        registry,
+        createAssetUrl: assets.createUrl,
+        environmentId,
+        attachmentId,
+      }),
     prepare: Effect.fn("TuiAttachments.prepare")(function* (
       environmentId: EnvironmentId,
       locals: ReadonlyArray<LocalAttachment>,

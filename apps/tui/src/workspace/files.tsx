@@ -593,6 +593,7 @@ export function FilesPanel(
         cwd: current.cwd,
         relativePath: current.file.relativePath,
         contents: current.draft,
+        expectedContents: current.file.contents,
       });
       setOpened({ ...current, file: { ...current.file, contents: current.draft }, editing: false });
       props.ui.notify(`Saved ${current.file.relativePath}`);

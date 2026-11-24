@@ -21,6 +21,7 @@ import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 
 import { makeIsServerInternalPath } from "../auth/serverInternalPaths.ts";
 import * as KnownWorkspaces from "./KnownWorkspaces.ts";
@@ -102,11 +103,25 @@ export class WorkspaceBinaryFileError extends Schema.TaggedError<WorkspaceBinary
   }
 }
 
+export class WorkspaceFileChangedError extends Schema.TaggedError<WorkspaceFileChangedError>()(
+  "WorkspaceFileChangedError",
+  {
+    workspaceRoot: Schema.String,
+    relativePath: Schema.String,
+    resolvedPath: Schema.String,
+  },
+) {
+  override get message(): string {
+    return `Workspace file '${this.relativePath}' changed before it could be saved.`;
+  }
+}
+
 export const WorkspaceFileSystemError = Schema.Union([
   WorkspaceFileSystemOperationError,
   WorkspaceFilePathEscapeError,
   WorkspacePathNotFileError,
   WorkspaceBinaryFileError,
+  WorkspaceFileChangedError,
 ]);
 export type WorkspaceFileSystemError = typeof WorkspaceFileSystemError.Type;
 
@@ -390,6 +405,7 @@ export const make = Effect.gen(function* () {
       byteLength: 0,
       truncated: false,
       exists: false,
+      supportsConditionalWrite: true,
     };
     const realTargetPath = target.realTargetPath;
     if (realTargetPath === null) return absentResult;
@@ -482,7 +498,13 @@ export const make = Effect.gen(function* () {
               new TextDecoder("utf-8", { fatal: true }).decode(fileBytes, { stream: truncated }),
             catch: binaryFileError,
           });
-          return { relativePath: target.relativePath, contents, byteLength: stat.size, truncated };
+          return {
+            relativePath: target.relativePath,
+            contents,
+            byteLength: stat.size,
+            truncated,
+            supportsConditionalWrite: true,
+          };
         }),
       (handle) =>
         handle === null
@@ -584,12 +606,46 @@ export const make = Effect.gen(function* () {
     return { relativePath: target.relativePath, realTargetPath };
   });
 
-  const writeFile: WorkspaceFileSystem["Service"]["writeFile"] = Effect.fn(
-    "WorkspaceFileSystem.writeFile",
-  )(function* (input) {
-    yield* knownWorkspaces.assertContains(input.cwd);
-    const target = yield* resolveWriteTarget(input);
+  const writeLocks = new Map<string, { semaphore: Semaphore.Semaphore; users: number }>();
+  const withWriteLock = <A, E, R>(filePath: string, effect: Effect.Effect<A, E, R>) =>
+    Effect.suspend(() => {
+      const lock = writeLocks.get(filePath) ?? { semaphore: Semaphore.makeUnsafe(1), users: 0 };
+      writeLocks.set(filePath, lock);
+      lock.users++;
+      return lock.semaphore.withPermit(effect).pipe(
+        Effect.ensuring(
+          Effect.sync(() => {
+            lock.users--;
+            if (lock.users === 0) writeLocks.delete(filePath);
+          }),
+        ),
+      );
+    });
+
+  const writeResolvedFile = Effect.fn("WorkspaceFileSystem.writeResolvedFile")(function* (
+    input: ProjectWriteFileInput,
+    target: { readonly relativePath: string; readonly realTargetPath: string },
+  ) {
     const realTargetPath = target.realTargetPath;
+    if (input.expectedContents !== undefined) {
+      // This excludes other service writes; direct filesystem writers do not participate in the lock.
+      const latest = yield* readFile({
+        cwd: input.cwd,
+        relativePath: realTargetPath,
+        allowMissing: true,
+      });
+      if (
+        latest.exists === false ||
+        latest.truncated ||
+        latest.contents !== input.expectedContents
+      ) {
+        return yield* new WorkspaceFileChangedError({
+          workspaceRoot: input.cwd,
+          relativePath: input.relativePath,
+          resolvedPath: realTargetPath,
+        });
+      }
+    }
     const replacesFile = yield* fileSystem
       .exists(realTargetPath)
       .pipe(Effect.orElseSucceed(() => false));
@@ -613,6 +669,7 @@ export const make = Effect.gen(function* () {
           }),
       ),
     );
+    // Native writes cannot be cancelled; keep the file lock until the promise settles.
     yield* Effect.tryPromise({
       // A symlink swapped in after the check is not followed. Windows lacks O_NOFOLLOW.
       try: () =>
@@ -632,7 +689,7 @@ export const make = Effect.gen(function* () {
           operation: "write-file",
           cause,
         }),
-    });
+    }).pipe(Effect.uninterruptible);
     // Editor autosave overwrites existing files, which leaves the indexed paths unchanged, and
     // fff's watcher applies the new contents on its own. A forced rescan re-walks the whole
     // workspace, and the save would wait for it.
@@ -640,6 +697,18 @@ export const make = Effect.gen(function* () {
       yield* workspaceEntries.refresh(input.cwd);
     }
     return { relativePath: target.relativePath };
+  });
+
+  const writeFile: WorkspaceFileSystem["Service"]["writeFile"] = Effect.fn(
+    "WorkspaceFileSystem.writeFile",
+  )(function* (input) {
+    yield* knownWorkspaces.assertContains(input.cwd);
+    const target = yield* resolveWriteTarget(input);
+    const lockKey =
+      (yield* HostProcess.Platform) === "win32"
+        ? target.realTargetPath.toLowerCase()
+        : target.realTargetPath;
+    return yield* withWriteLock(lockKey, writeResolvedFile(input, target));
   });
 
   return WorkspaceFileSystem.of({ getMetadata, readFile, writeFile });

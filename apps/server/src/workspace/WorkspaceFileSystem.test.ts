@@ -234,6 +234,7 @@ it.layer(layerTest, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
           contents: "export const answer = 42;\n",
           byteLength: 26,
           truncated: false,
+          supportsConditionalWrite: true,
         });
 
         const bomContents = "\uFEFFexport const answer = 42;\n";
@@ -274,6 +275,7 @@ it.layer(layerTest, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
           contents: "",
           byteLength: 0,
           truncated: false,
+          supportsConditionalWrite: true,
           exists: false,
         });
 
@@ -298,6 +300,7 @@ it.layer(layerTest, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
           contents,
           byteLength: Buffer.byteLength(contents),
           truncated: false,
+          supportsConditionalWrite: true,
         });
       }),
     );
@@ -334,6 +337,7 @@ it.layer(layerTest, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
           contents: "# Report\n",
           byteLength: 9,
           truncated: false,
+          supportsConditionalWrite: true,
         });
 
         for (const relativePath of whitespaceFilePaths) {
@@ -365,6 +369,7 @@ it.layer(layerTest, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
             contents: "# Notes\n",
             byteLength: 8,
             truncated: false,
+            supportsConditionalWrite: true,
           });
         }),
     );
@@ -621,6 +626,60 @@ it.layer(layerTest, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
   });
 
   describe("writeFile", () => {
+    it.effect("keeps the winning edit when two clients save the same original contents", () =>
+      Effect.gen(function* () {
+        const files = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        const paths = ["notes.md"];
+        if (symlinksSupported) {
+          yield* fs.symlink(path.join(cwd, "notes.md"), path.join(cwd, "alias.md"));
+          paths.push("alias.md");
+        }
+        for (const relativePath of paths) {
+          yield* writeTextFile(cwd, "notes.md", "original\n");
+          const saves = ["first\n", "second\n"].map((contents, index) => ({
+            cwd,
+            relativePath: index === 0 ? "notes.md" : relativePath,
+            contents,
+            expectedContents: "original\n",
+          }));
+          const results = yield* Effect.all(
+            saves.map((input) =>
+              files
+                .writeFile(input)
+                .pipe(Effect.match({ onSuccess: () => "saved", onFailure: (error) => error._tag })),
+            ),
+            { concurrency: "unbounded" },
+          );
+          expect(results.toSorted()).toEqual(["WorkspaceFileChangedError", "saved"]);
+          const winner = saves[results.indexOf("saved")]!.contents;
+          expect(yield* fs.readFileString(path.join(cwd, "notes.md"))).toBe(winner);
+
+          const stale = yield* files
+            .writeFile(saves[0]!)
+            .pipe(Effect.match({ onSuccess: () => "saved", onFailure: (error) => error._tag }));
+          expect(stale).toBe("WorkspaceFileChangedError");
+          expect(yield* fs.readFileString(path.join(cwd, "notes.md"))).toBe(winner);
+
+          yield* writeTextFile(cwd, "notes.md", "external edit\n");
+          const changed = yield* files
+            .writeFile({ ...saves[0]!, expectedContents: winner })
+            .pipe(Effect.match({ onSuccess: () => "saved", onFailure: (error) => error._tag }));
+          expect(changed).toBe("WorkspaceFileChangedError");
+          expect(yield* fs.readFileString(path.join(cwd, "notes.md"))).toBe("external edit\n");
+
+          yield* fs.remove(path.join(cwd, "notes.md"));
+          const deleted = yield* files
+            .writeFile({ ...saves[0]!, expectedContents: "" })
+            .pipe(Effect.match({ onSuccess: () => "saved", onFailure: (error) => error._tag }));
+          expect(deleted).toBe("WorkspaceFileChangedError");
+          expect(yield* fs.exists(path.join(cwd, "notes.md"))).toBe(false);
+        }
+      }),
+    );
+
     it.effect("rejects writes outside a known workspace", () =>
       Effect.gen(function* () {
         const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;

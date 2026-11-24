@@ -25,6 +25,8 @@ import {
 const decodeProjectCreatePayload = Schema.decodeUnknownSync(ProjectCreatePayload);
 const decodeProjectUpdatePayload = Schema.decodeUnknownSync(ProjectUpdatePayload);
 const decodeProjectMutation = Schema.decodeUnknownSync(ProjectMutation);
+const decodeProjectWriteFileError = Schema.decodeUnknownSync(ProjectWriteFileError);
+const encodeProjectWriteFileError = Schema.encodeSync(ProjectWriteFileError);
 
 describe("project RPC errors", () => {
   it("keeps whitespace in file paths across the wire", () => {
@@ -133,6 +135,34 @@ describe("project RPC errors", () => {
     expect(writeError.message).toBe("Legacy project write failure.");
     expect(writeError.relativePath).toBeUndefined();
     expect(writeError.failure).toBeUndefined();
+  });
+
+  it("preserves conditional-save negotiation and accepts legacy file reads", () => {
+    const legacy = {
+      relativePath: "notes.md",
+      contents: "original\n",
+      byteLength: 9,
+      truncated: false,
+    };
+    const decodeRead = Schema.decodeUnknownSync(ProjectReadFileResult);
+    expect(decodeRead(legacy).supportsConditionalWrite).toBeUndefined();
+    expect(decodeRead({ ...legacy, supportsConditionalWrite: true }).supportsConditionalWrite).toBe(
+      true,
+    );
+    const decodeWrite = Schema.decodeUnknownSync(ProjectWriteFileInput);
+    const input = { cwd: "/workspace", relativePath: "notes.md", contents: "edited\n" };
+    expect(decodeWrite(input).expectedContents).toBeUndefined();
+    expect(decodeWrite({ ...input, expectedContents: legacy.contents }).expectedContents).toBe(
+      legacy.contents,
+    );
+    const conflict = new ProjectWriteFileError({
+      cwd: input.cwd,
+      relativePath: input.relativePath,
+      failure: "file_changed",
+    });
+    const decoded = decodeProjectWriteFileError(encodeProjectWriteFileError(conflict));
+    expect(decoded.failure).toBe("file_changed");
+    expect(decoded.message).toContain("Keep your draft open");
   });
 });
 

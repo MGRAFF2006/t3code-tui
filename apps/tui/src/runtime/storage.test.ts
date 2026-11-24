@@ -21,6 +21,12 @@ describe("TUI credential storage", () => {
       Effect.gen(function* () {
         const layer = yield* Effect.promise(() => createStorage(directory));
         const otherWindow = yield* Effect.promise(() => createStorage(directory));
+        yield* Effect.promise(() =>
+          NodeFSP.writeFile(
+            NodePath.join(directory, "connections.json.lock"),
+            "abandoned legacy writer",
+          ),
+        );
         yield* Effect.gen(function* () {
           const credentials = yield* CredentialStore.ConnectionCredentialStore;
           yield* Effect.all(
@@ -68,6 +74,11 @@ describe("TUI credential storage", () => {
             NodeFSP.readFile(NodePath.join(directory, ".gitignore"), "utf8"),
           ),
         ).toContain("*");
+        expect(
+          yield* Effect.promise(() =>
+            NodeFSP.readFile(NodePath.join(directory, "connections.json.lock"), "utf8"),
+          ),
+        ).toBe("abandoned legacy writer");
       }),
     ),
   );

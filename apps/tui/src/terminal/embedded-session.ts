@@ -19,12 +19,15 @@ export function attachEmbeddedTerminal(options: {
   let active = true;
   let ready = false;
   let failed = false;
+  let generation = 0;
+  let initialized = false;
   let pendingBytes = 0;
   const pending: { data: string; reply: boolean }[] = [];
   let grid = { cols: options.cols, rows: options.rows };
   let writes = Promise.resolve();
   const fail = (cause: unknown) => {
     if (!active) return;
+    generation++;
     ready = false;
     failed = true;
     pending.length = 0;
@@ -47,14 +50,21 @@ export function attachEmbeddedTerminal(options: {
       try {
         const event = decodeEvent(value);
         if (event.type === "snapshot" || event.type === "restarted") {
+          if (initialized) {
+            generation++;
+            pending.length = 0;
+            pendingBytes = 0;
+          }
+          initialized = true;
           ready = event.snapshot.status === "running";
           if (ready) {
             failed = false;
-            void transport.invoke(WS_METHODS.terminalResize, { ...session, ...grid }).catch(fail);
+            resize();
             for (const value of pending.splice(0)) send(value.data, value.reply);
             pendingBytes = 0;
           }
         } else if (event.type === "exited" || event.type === "closed" || event.type === "error") {
+          generation++;
           ready = false;
           failed = true;
           pending.length = 0;
@@ -67,10 +77,17 @@ export function attachEmbeddedTerminal(options: {
     },
     fail,
   );
+  function resize() {
+    const owner = generation;
+    void transport.invoke(WS_METHODS.terminalResize, { ...session, ...grid }).catch((cause) => {
+      if (owner === generation) fail(cause);
+    });
+  }
   function send(data: string, reply: boolean) {
+    const owner = generation;
     writes = writes
       .then(async () => {
-        if (active && ready)
+        if (active && ready && owner === generation)
           await transport.invoke(WS_METHODS.terminalWrite, {
             ...session,
             data,
@@ -78,7 +95,9 @@ export function attachEmbeddedTerminal(options: {
             ...(reply ? { reply: true } : {}),
           });
       })
-      .catch(fail);
+      .catch((cause) => {
+        if (owner === generation) fail(cause);
+      });
   }
   return {
     write(bytes: Uint8Array, reply = false) {
@@ -99,11 +118,12 @@ export function attachEmbeddedTerminal(options: {
     },
     resize(cols: number, rows: number) {
       grid = { cols, rows };
-      if (active && ready)
-        void transport.invoke(WS_METHODS.terminalResize, { ...session, cols, rows }).catch(fail);
+      if (active && ready) resize();
     },
     dispose() {
+      if (!active) return;
       active = false;
+      generation++;
       ready = false;
       pending.length = 0;
       stop();

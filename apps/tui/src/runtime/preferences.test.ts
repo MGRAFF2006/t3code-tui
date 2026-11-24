@@ -2,9 +2,11 @@
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
+import * as NodeChildProcess from "node:child_process";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import { createPreferences } from "./preferences.ts";
+import { acquirePrivateStateLock } from "../connections/state-lock.ts";
 
 const withDirectory = <A, E, R>(use: (directory: string) => Effect.Effect<A, E, R>) =>
   Effect.acquireUseRelease(
@@ -14,6 +16,51 @@ const withDirectory = <A, E, R>(use: (directory: string) => Effect.Effect<A, E, 
   );
 
 describe("terminal preferences", () => {
+  it("recovers writes after a lock owner crashes, preserving abandoned legacy locks", async () => {
+    const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-tui-crash-"));
+    const filename = NodePath.join(directory, "preferences.json");
+    const child = NodeChildProcess.spawn(
+      process.execPath,
+      [
+        "--input-type=module",
+        "-e",
+        `
+      import { DatabaseSync } from "node:sqlite";
+      import { writeFileSync } from "node:fs";
+      writeFileSync(process.argv[1] + ".lock", "legacy writer", { mode: 0o600 });
+      const db = new DatabaseSync(process.argv[1] + ".lock.sqlite");
+      db.exec("BEGIN EXCLUSIVE");
+      process.stdout.write("locked");
+      process.stdin.resume();
+    `,
+        filename,
+      ],
+      { stdio: ["pipe", "pipe", "pipe"] },
+    );
+    const waitForExit = () => new Promise<void>((resolve) => child.once("exit", () => resolve()));
+    try {
+      await new Promise<void>((resolve, reject) => {
+        child.stdout.once("data", () => resolve());
+        child.once("error", reject);
+        child.once("exit", () => reject(new Error("Lock owner exited before acquiring its lock.")));
+      });
+      const preferences = await createPreferences(directory);
+      await expect(preferences.update({ theme: "dark" })).rejects.toThrow("lock");
+      const exited = waitForExit();
+      child.kill("SIGKILL");
+      await exited;
+      await preferences.update({ theme: "light" });
+      expect((await createPreferences(directory)).get().theme).toBe("light");
+      expect(await NodeFSP.readFile(`${filename}.lock`, "utf8")).toBe("legacy writer");
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) {
+        const exited = waitForExit();
+        child.kill("SIGKILL");
+        await exited;
+      }
+      await NodeFSP.rm(directory, { recursive: true, force: true });
+    }
+  });
   it.effect(
     "merges independent terminal windows and serializes local updates without changing connection credentials",
     () =>
@@ -159,16 +206,19 @@ describe("terminal preferences", () => {
           yield* Effect.promise(() => preferences.update({ theme: "light" }));
           const filename = NodePath.join(directory, "preferences.json");
           const saved = yield* Effect.promise(() => NodeFSP.readFile(filename, "utf8"));
-          yield* Effect.promise(() =>
-            NodeFSP.writeFile(`${filename}.lock`, "another writer", { mode: 0o600 }),
+          const lock = yield* Effect.promise(() =>
+            acquirePrivateStateLock(`${filename}.lock.sqlite`),
           );
-          yield* Effect.promise(async () => {
-            await expect(preferences.update({ theme: "dark" })).rejects.toThrow(
-              "Could not lock terminal preferences",
-            );
-          });
-          expect(yield* Effect.promise(() => NodeFSP.readFile(filename, "utf8"))).toBe(saved);
-          yield* Effect.promise(() => NodeFSP.rm(`${filename}.lock`));
+          try {
+            yield* Effect.promise(async () => {
+              await expect(preferences.update({ theme: "dark" })).rejects.toThrow(
+                "Could not lock terminal preferences",
+              );
+            });
+            expect(yield* Effect.promise(() => NodeFSP.readFile(filename, "utf8"))).toBe(saved);
+          } finally {
+            lock.close();
+          }
           yield* Effect.promise(async () => {
             for (const patch of [
               { sidebarWidth: 21 },

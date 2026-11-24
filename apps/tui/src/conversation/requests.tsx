@@ -79,14 +79,26 @@ export function RequestCards(
     cachedDrafts.set(draftKey(id, question.id), next);
     setDrafts((value) => ({ ...value, [draftKey(id, question.id)]: next }));
   };
-  const execute = (command: OrchestrationV2Command) => {
-    props.onFocus();
-    void props.ui.run(async () => {
+  const dispatchResponse = async (
+    command: Extract<
+      OrchestrationV2Command,
+      { type: "runtime-request.respond" | "thread.user-input.dismiss" }
+    >,
+  ) => {
+    if (responding().has(command.requestId)) return;
+    setResponding((current) => new Set([...current, command.requestId]));
+    try {
       if (!inOriginalThread())
         throw new Error("Return to the original conversation to answer this request.");
       await request(props.client, ORCHESTRATION_V2_WS_METHODS.dispatchCommand, command);
       props.onDone();
-    });
+    } finally {
+      setResponding((current) => new Set([...current].filter((id) => id !== command.requestId)));
+    }
+  };
+  const execute = (command: Parameters<typeof dispatchResponse>[0]) => {
+    props.onFocus();
+    void props.ui.run(() => dispatchResponse(command));
   };
   const respond = (
     requestId: RuntimeRequestId,
@@ -145,7 +157,7 @@ export function RequestCards(
               onSubmit: async (values) => {
                 if (props.state()?.environmentId !== environmentId)
                   throw new Error("Return to the request's environment to respond.");
-                await request(props.client, ORCHESTRATION_V2_WS_METHODS.dispatchCommand, {
+                await dispatchResponse({
                   type: "runtime-request.respond",
                   commandId: CommandId.make(SecureRandom.uuidV4Unsafe()),
                   threadId,

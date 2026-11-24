@@ -6,6 +6,7 @@ import { describe, expect, it } from "@effect/vitest";
 import { vi } from "vite-plus/test";
 import * as Effect from "effect/Effect";
 import * as Deferred from "effect/Deferred";
+import * as Queue from "effect/Queue";
 import * as Layer from "effect/Layer";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Fiber from "effect/Fiber";
@@ -13,10 +14,14 @@ import * as SubscriptionRef from "effect/SubscriptionRef";
 import {
   EnvironmentRegistry,
   AVAILABLE_CONNECTION_STATE,
+  type PreparedConnection,
 } from "@t3tools/client-runtime/connection";
 import type { SupervisorConnectionState } from "@t3tools/client-runtime/connection";
 import type { SshPasswordPrompt } from "@t3tools/ssh/auth";
 import * as ClientPlatform from "./platform.ts";
+import * as LocalAttachments from "./attachments.ts";
+import * as AttachmentState from "@t3tools/client-runtime/state/attachments";
+import { FetchHttpClient } from "effect/http";
 import * as Option from "effect/Option";
 import { Atom, AsyncResult } from "effect/reactivity";
 import * as ShellState from "@t3tools/client-runtime/state/shell";
@@ -47,6 +52,12 @@ import {
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Cause from "effect/Cause";
+import { RpcClientError } from "effect/rpc";
+import { EnvironmentSupervisor } from "@t3tools/client-runtime/connection";
+import type { RpcSession } from "../../../../packages/client-runtime/src/rpc/session.ts";
+import type { WsRpcProtocolClient } from "../../../../packages/client-runtime/src/rpc/protocol.ts";
+import { PrimaryConnectionTarget } from "@t3tools/client-runtime/connection";
+import { startThreadTurn } from "@t3tools/client-runtime/operations";
 import {
   v2Project,
   v2Projection,
@@ -176,6 +187,9 @@ describe("terminal client onboarding", () => {
     "compact-send-switch",
     "concurrent-send-switch",
     "uncertain-send-switch",
+    "socket-loss-send-switch",
+    "attachment-uncertain-send-switch",
+    "attachment-expired-send-switch",
   ] as const)("keeps model selection with the intended destination for %s", (scenario) =>
     Effect.acquireUseRelease(
       Effect.promise(() => NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-tui-model-"))),
@@ -270,6 +284,7 @@ describe("terminal client onboarding", () => {
               return {
                 ...bridge,
                 invoke: async (method, payload) => {
+                  if (method === ORCHESTRATION_V2_WS_METHODS.getThreadProjection) return threadA;
                   if (method !== ORCHESTRATION_V2_WS_METHODS.launchThread)
                     return bridge.invoke(method, payload);
                   launched = payload;
@@ -277,6 +292,74 @@ describe("terminal client onboarding", () => {
                 },
               };
             });
+          const socketOperations = yield* Queue.unbounded<Effect.Effect<void>>();
+          yield* Effect.forever(Queue.take(socketOperations).pipe(Effect.flatten)).pipe(
+            Effect.forkChild,
+          );
+          const wireCommands: Array<{ commandId: string; messageId?: string }> = [];
+          const firstLost = yield* Deferred.make<void>();
+          const wireClient = {
+            [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: (command: { commandId: string }) =>
+              Effect.sync(() => {
+                wireCommands.push(command);
+                return { sequence: wireCommands.length };
+              }),
+          } as unknown as WsRpcProtocolClient;
+          const healthySession: RpcSession = {
+            client: wireClient,
+            initialConfig: Effect.succeed({ environment: { capabilities: {} } } as never),
+            subscribeServerConfig: (input = {}) => wireClient.subscribeServerConfig(input),
+            ready: Effect.void,
+            probe: Effect.void,
+            inboundFrames: Effect.succeed(0),
+            closed: Effect.never,
+          };
+          const socket = yield* SubscriptionRef.make(Option.some(healthySession));
+          const supervisor = EnvironmentSupervisor.EnvironmentSupervisor.of({
+            target: new PrimaryConnectionTarget({
+              environmentId: EnvironmentId.make("model-environment"),
+              label: "Model server",
+              httpBaseUrl: "http://model-server.invalid",
+              wsBaseUrl: "ws://model-server.invalid",
+            }),
+            state: yield* SubscriptionRef.make<SupervisorConnectionState>({
+              ...AVAILABLE_CONNECTION_STATE,
+              desired: true,
+              phase: "connected" as const,
+            }),
+            session: socket,
+            prepared: yield* SubscriptionRef.make(Option.none<PreparedConnection>()),
+            connect: Effect.void,
+            disconnect: Effect.void,
+            retryNow: Effect.void,
+          });
+          if (scenario === "socket-loss-send-switch")
+            yield* SubscriptionRef.set(
+              socket,
+              Option.some({
+                ...healthySession,
+                client: {
+                  ...wireClient,
+                  [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: (command: {
+                    commandId: string;
+                    text?: string;
+                  }) =>
+                    command.text === "/compact"
+                      ? wireClient[ORCHESTRATION_V2_WS_METHODS.dispatchCommand](command as never)
+                      : Effect.gen(function* () {
+                          wireCommands.push(command);
+                          yield* SubscriptionRef.set(socket, Option.none());
+                          yield* Deferred.succeed(firstLost, undefined);
+                          return yield* new RpcClientError.RpcClientError({
+                            reason: new RpcClientError.RpcClientDefect({
+                              message: "socket closed",
+                              cause: new Error("socket closed"),
+                            }),
+                          });
+                        }),
+                } as unknown as WsRpcProtocolClient,
+              }),
+            );
           let dispatched: StartThreadTurnInput | undefined;
           const dispatches: StartThreadTurnInput[] = [];
           const commandsFactory = ThreadState.createThreadEnvironmentAtoms;
@@ -291,7 +374,35 @@ describe("terminal client onboarding", () => {
                   run: async (_registry, target) => {
                     dispatched = target.input;
                     dispatches.push(target.input);
-                    if (scenario === "uncertain-send-switch" && dispatches.length === 2)
+                    if (scenario === "socket-loss-send-switch") {
+                      return new Promise<Awaited<ReturnType<typeof original.startTurn.run>>>(
+                        (resolve, reject) => {
+                          Queue.offerUnsafe(
+                            socketOperations,
+                            startThreadTurn(target.input).pipe(
+                              Effect.provideService(
+                                EnvironmentSupervisor.EnvironmentSupervisor,
+                                supervisor,
+                              ),
+                              Effect.provideService(
+                                SecureRandom.SecureRandom,
+                                SecureRandom.make((size) => new Uint8Array(size)),
+                              ),
+                              Effect.match({
+                                onFailure: reject,
+                                onSuccess: (value) => resolve(AsyncResult.success(value)),
+                              }),
+                            ),
+                          );
+                        },
+                      );
+                    }
+                    expect(target.input.resendAfterSocketLoss).toBe(false);
+                    if (
+                      (scenario === "uncertain-send-switch" ||
+                        scenario.startsWith("attachment-")) &&
+                      dispatches.length === 2
+                    )
                       throw new Error("Message accepted; reply connection lost");
                     return AsyncResult.success({ sequence: 1 });
                   },
@@ -308,6 +419,48 @@ describe("terminal client onboarding", () => {
               capabilities: {},
             }),
           );
+          const attachmentScenario = scenario.startsWith("attachment-");
+          const localPath = NodePath.join(configDir, "original.txt");
+          if (attachmentScenario)
+            yield* Effect.promise(async () => {
+              await NodeFSP.writeFile(localPath, "original bytes");
+              await NodeFSP.utimes(localPath, 1, 1);
+            });
+          const locals = attachmentScenario
+            ? [yield* Effect.promise(() => LocalAttachments.inspectLocalAttachment(localPath))]
+            : [];
+          let uploads = 0;
+          using _uploadCycle = vi
+            .spyOn(AttachmentState, "runAttachmentUploadCycle")
+            .mockImplementation(() =>
+              Effect.succeed({ status: "uploaded", attachmentId: `pending-upload-${++uploads}` }),
+            );
+          using _verifyUpload = vi
+            .spyOn(AttachmentState, "verifyPersistedAttachmentUpload")
+            .mockImplementation(() =>
+              Effect.succeed({
+                status: scenario === "attachment-expired-send-switch" ? "missing" : "verified",
+              }),
+            );
+          using deleteUpload = vi
+            .spyOn(AttachmentState, "deletePendingAttachmentUpload")
+            .mockImplementation(() => {});
+          const uploadsFactory = LocalAttachments.createLocalAttachmentUploads;
+          using _uploads = vi
+            .spyOn(LocalAttachments, "createLocalAttachmentUploads")
+            .mockImplementation((...args) => {
+              const owned = uploadsFactory(...args);
+              return {
+                ...owned,
+                prepare: (...prepareArgs) =>
+                  owned.prepare(...prepareArgs).pipe(
+                    Effect.provideService(EnvironmentRegistry.EnvironmentRegistry, {
+                      run: () => Effect.succeed("http://model-server.invalid"),
+                    } as unknown as EnvironmentRegistry.EnvironmentRegistry["Service"]),
+                    Effect.provide(FetchHttpClient.layer),
+                  ),
+              };
+            });
           const client = yield* Effect.promise(() =>
             createTuiClient({ configDir, url: "http://model-server.invalid" }),
           );
@@ -342,11 +495,12 @@ describe("terminal client onboarding", () => {
               context: { version: 1, records: [] },
               freshContext: scenario === "send-switch",
               compactBeforeSend: true,
+              localAttachments: locals,
               composerDraft: {
                 text: "Message for A",
                 mentions: [],
                 context: [],
-                attachments: [],
+                attachments: locals,
                 freshContext: false,
               },
             });
@@ -356,7 +510,46 @@ describe("terminal client onboarding", () => {
                   "already being prepared or sent",
                 ),
               );
-            if (scenario === "uncertain-send-switch") {
+            if (scenario === "socket-loss-send-switch") {
+              const failed = expect(sending).rejects.toThrow("socket closed");
+              yield* Deferred.await(firstLost);
+              yield* SubscriptionRef.set(socket, Option.some(healthySession));
+              yield* Effect.promise(() => failed);
+              expect(wireCommands).toHaveLength(2);
+              const pending = client.snapshot().pendingSends![0]!;
+              yield* Effect.promise(() => client.retryPendingSend(pending.id));
+              expect(wireCommands).toHaveLength(3);
+              expect(wireCommands[2]).toEqual(wireCommands[1]);
+              expect(client.snapshot().pendingSends).toEqual([]);
+            } else if (attachmentScenario) {
+              yield* Effect.promise(() => expect(sending).rejects.toThrow("reply connection lost"));
+              const pending = client.snapshot().pendingSends![0]!;
+              client.releaseLocalAttachments(EnvironmentId.make("model-environment"), locals);
+              expect(deleteUpload).not.toHaveBeenCalled();
+              if (scenario === "attachment-expired-send-switch") {
+                yield* Effect.promise(() => NodeFSP.unlink(localPath));
+                yield* Effect.promise(() =>
+                  expect(client.retryPendingSend(pending.id)).rejects.toThrow(
+                    "recovery record and draft are retained",
+                  ),
+                );
+                expect(client.snapshot().pendingSends).toEqual([pending]);
+                yield* Effect.promise(() => NodeFSP.writeFile(localPath, "original bytes"));
+                yield* Effect.promise(() =>
+                  NodeFSP.utimes(
+                    localPath,
+                    locals[0]!.modifiedAtMs / 1000,
+                    locals[0]!.modifiedAtMs / 1000,
+                  ),
+                );
+              }
+              yield* Effect.promise(() => client.retryPendingSend(pending.id));
+              expect(client.snapshot().pendingSends).toEqual([]);
+              expect(dispatches[2]?.commandId).toBe(dispatches[1]?.commandId);
+              expect(dispatches[2]?.message.messageId).toBe(dispatches[1]?.message.messageId);
+              expect(uploads).toBe(scenario === "attachment-expired-send-switch" ? 2 : 1);
+              expect(deleteUpload).not.toHaveBeenCalled();
+            } else if (scenario === "uncertain-send-switch") {
               yield* Effect.promise(() => expect(sending).rejects.toThrow("reply connection lost"));
               const pending = client.snapshot().pendingSends![0]!;
               expect(pending).toMatchObject({
@@ -393,7 +586,12 @@ describe("terminal client onboarding", () => {
               interactionMode: "default",
             });
             expect(dispatches).toHaveLength(
-              scenario === "send-switch" ? 1 : scenario === "uncertain-send-switch" ? 3 : 2,
+              scenario === "send-switch"
+                ? 1
+                : ["uncertain-send-switch", "socket-loss-send-switch"].includes(scenario) ||
+                    attachmentScenario
+                  ? 3
+                  : 2,
             );
             if (scenario === "compact-send-switch")
               expect(dispatches[0]).toMatchObject({

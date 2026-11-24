@@ -9,7 +9,8 @@ export function pendingSendActions(
     const environment = props.state()?.environmentId;
     const entries = await props.client.refreshPendingSends();
     if (props.state()?.environmentId !== environment) return;
-    if (!entries.length) return props.ui.notify("No unconfirmed messages.");
+    const invalid = props.client.invalidPendingSends();
+    if (!entries.length && !invalid.length) return props.ui.notify("No unconfirmed messages.");
     const choose = (entry: PendingSend) => {
       const main = entry.steps[entry.steps.length - 1]!;
       const guard = () => {
@@ -24,14 +25,21 @@ export function pendingSendActions(
             : "Message accepted. Review the retained draft before sending another message.",
         );
       };
-      props.ui.choose("Unconfirmed message", [
+      const completed = entry.nextStep === entry.steps.length;
+      const neverDispatched = entry.nextStep === 0 && entry.attempted === false;
+      const status = completed
+        ? "Accepted message · draft cleanup pending"
+        : neverDispatched
+          ? "Prepared message · not dispatched"
+          : "Unconfirmed message";
+      props.ui.choose(status, [
         {
           title: "Inspect captured message",
           description: `${entry.createdAt} · ${main.modelSelection.instanceId}/${main.modelSelection.model} · ${main.dispatchMode ?? "auto"}`,
           run: () =>
             props.ui.text(
-              "Unconfirmed message",
-              `${main.message.text}\n\n${main.message.attachments.length} attachments · ${main.message.context?.records.length ?? 0} context records\nDestination: ${entry.environmentId} / ${entry.threadId}\nThis message may already be accepted. Reconcile checks saved server messages; retry uses the same command and message identities.`,
+              status,
+              `${main.message.text}\n\n${main.message.attachments.length} attachments · ${main.message.context?.records.length ?? 0} context records\nDestination: ${entry.environmentId} / ${entry.threadId}\n${completed ? "The server accepted this message. Retry completes local draft cleanup without dispatching again." : neverDispatched ? "This message was prepared but no dispatch was attempted." : "This message may already be accepted."} Reconcile checks saved server messages; retry uses the same command and message identities.`,
             ),
         },
         {
@@ -82,15 +90,47 @@ export function pendingSendActions(
         },
       ]);
     };
-    props.ui.choose(
-      "Pending sends",
-      entries.map((entry) => ({
+    props.ui.choose("Pending sends", [
+      ...entries.map((entry) => ({
         title:
           entry.steps[entry.steps.length - 1]!.message.text.slice(0, 100) ||
           "Message with attachments",
         description: `${entry.environmentId === environment ? "Current environment" : "Other environment"} · ${entry.threadId} · ${entry.createdAt}`,
         run: () => choose(entry),
       })),
-    );
+      ...invalid.map((record) => ({
+        title: "Unreadable pending-send record",
+        description: record.file,
+        run: () =>
+          props.ui.choose("Unreadable recovery record", [
+            {
+              title: "Inspect preserved file",
+              description: record.file,
+              run: () =>
+                void props.ui.run(async () =>
+                  props.ui.text(
+                    "Unreadable pending send",
+                    `${record.file}\n\n${record.error}\n\n${await props.client.inspectInvalidPendingSend(record.file)}`,
+                  ),
+                ),
+            },
+            {
+              title: "Move aside",
+              description:
+                "Preserves the bytes in a .invalid file. Does not cancel any server message.",
+              run: () =>
+                props.ui.confirm(
+                  "Move unreadable send record aside?",
+                  `The original is preserved at ${record.file}.invalid. Its acceptance is unknown. Review retained drafts before sending again.`,
+                  async () => {
+                    await props.client.moveInvalidPendingSend(record.file);
+                    props.ui.notify(`Recovery file preserved at ${record.file}.invalid.`);
+                  },
+                  "Move aside",
+                ),
+            },
+          ]),
+      })),
+    ]);
   });
 }
