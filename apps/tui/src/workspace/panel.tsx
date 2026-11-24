@@ -71,15 +71,6 @@ export function WorkspacePanel(
   );
   createEffect(
     on(
-      () => props.openPath,
-      (value) => {
-        if (value) setTab("files");
-      },
-    ),
-  );
-
-  createEffect(
-    on(
       () => [environmentId(), connection(), cwd()] as const,
       ([destination, phase, directory]) => {
         setStatus({ local: null, remote: null });

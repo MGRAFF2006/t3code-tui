@@ -520,7 +520,10 @@ export function App(props: { client: TuiClient | null; demo?: boolean; onExit: (
       navigatingHistory = true;
       try {
         if (environment() !== target.entry.environmentId)
-          await client().selectEnvironment(target.entry.environmentId);
+          await client().selectEnvironment(
+            target.entry.environmentId,
+            () => generation === navigationRequest,
+          );
         if (generation !== navigationRequest) return;
         if (environment() !== target.entry.environmentId)
           throw new Error(
@@ -808,7 +811,8 @@ export function App(props: { client: TuiClient | null; demo?: boolean; onExit: (
       onLaunched: async ({ environmentId, threadId, background }) => {
         if (background || !isCurrent()) return;
         if (!(await beforeNavigate()) || !isCurrent()) return;
-        if (environment() !== environmentId) await client().selectEnvironment(environmentId);
+        if (environment() !== environmentId)
+          await client().selectEnvironment(environmentId, isCurrent);
         if (environment() !== environmentId || navigationRequest !== navigationGeneration) return;
         client().selectThread(threadId);
         setArea("chat");

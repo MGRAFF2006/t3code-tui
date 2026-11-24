@@ -747,8 +747,11 @@ export async function createTuiClient(options: TuiConnectionOptions = {}) {
     const transport = createRpcBridge(runtime, registry, () => target.environmentId, observe);
     return readThreadLaunchContext(transport, target.environmentId);
   };
-  const selectEnvironment = async (id: string) => {
+  let environmentSelectionGeneration = 0;
+  const selectEnvironment = async (id: string, isCurrent: () => boolean = () => true) => {
+    const generation = ++environmentSelectionGeneration;
     const target = await ensureEnvironment(id);
+    if (closed || generation !== environmentSelectionGeneration || !isCurrent()) return;
     clearViewedThread();
     for (const stop of stops) stop();
     stops.clear();

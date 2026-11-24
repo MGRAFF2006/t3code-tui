@@ -5,6 +5,11 @@ import * as NodePath from "node:path";
 import { describe, expect, it } from "@effect/vitest";
 import { vi } from "vite-plus/test";
 import * as Effect from "effect/Effect";
+import * as Deferred from "effect/Deferred";
+import * as Fiber from "effect/Fiber";
+import * as Layer from "effect/Layer";
+import { EnvironmentRegistry } from "@t3tools/client-runtime/connection";
+import * as ClientPlatform from "../runtime/platform.ts";
 import {
   EnvironmentId,
   ORCHESTRATION_V2_WS_METHODS,
@@ -32,6 +37,34 @@ describe("captured terminal launch destinations", () => {
           Effect.gen(function* () {
             const destination = EnvironmentId.make("destination");
             const origin = EnvironmentId.make("origin");
+            let selectionGate:
+              | { entered: Deferred.Deferred<void>; release: Deferred.Deferred<void> }
+              | undefined;
+            const platformFactory = ClientPlatform.createClientLayer;
+            using _platform = vi
+              .spyOn(ClientPlatform, "createClientLayer")
+              .mockImplementation(async (...args) => {
+                const original = await platformFactory(...args);
+                const registry = Layer.effect(
+                  EnvironmentRegistry.EnvironmentRegistry,
+                  Effect.gen(function* () {
+                    const service = yield* EnvironmentRegistry.EnvironmentRegistry;
+                    return {
+                      ...service,
+                      setEnabled: (id, enabled) =>
+                        Effect.gen(function* () {
+                          const gate = selectionGate;
+                          if (gate && id === destination) {
+                            yield* Deferred.succeed(gate.entered, undefined);
+                            yield* Deferred.await(gate.release);
+                          }
+                          yield* service.setEnabled(id, enabled);
+                        }),
+                    } satisfies typeof service;
+                  }),
+                ).pipe(Layer.provide(original.layer));
+                return { ...original, layer: Layer.merge(original.layer, registry) };
+              });
             const remoteModel = {
               instanceId: ProviderInstanceId.make("remote-provider"),
               model: "remote-default",
@@ -162,6 +195,31 @@ describe("captured terminal launch destinations", () => {
             });
             expect(client.snapshot().environmentId).toBe(origin);
             expect(stopped).toHaveBeenCalledTimes(2);
+            selectionGate = {
+              entered: yield* Deferred.make<void>(),
+              release: yield* Deferred.make<void>(),
+            };
+            let current = true;
+            const cancelled = yield* Effect.forkChild(
+              Effect.promise(() => client.selectEnvironment(destination, () => current)),
+            );
+            yield* Deferred.await(selectionGate.entered);
+            current = false;
+            yield* Deferred.succeed(selectionGate.release, undefined);
+            yield* Fiber.join(cancelled);
+            expect(client.snapshot().environmentId).toBe(origin);
+            selectionGate = {
+              entered: yield* Deferred.make<void>(),
+              release: yield* Deferred.make<void>(),
+            };
+            const superseded = yield* Effect.forkChild(
+              Effect.promise(() => client.selectEnvironment(destination)),
+            );
+            yield* Deferred.await(selectionGate.entered);
+            yield* Effect.promise(() => client.selectEnvironment(origin));
+            yield* Deferred.succeed(selectionGate.release, undefined);
+            yield* Fiber.join(superseded);
+            expect(client.snapshot().environmentId).toBe(origin);
           }),
         (directory) => Effect.promise(() => NodeFSP.rm(directory, { recursive: true })),
       ),
