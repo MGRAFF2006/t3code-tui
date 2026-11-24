@@ -116,6 +116,8 @@ import { resolveDeviceHubAccess } from "@t3tools/client-runtime/state/deviceHubA
 import { PREVIEW_STREAM_BASE_PATH } from "@t3tools/client-runtime/preview/server-browser-stream";
 import type { StartThreadTurnInput } from "@t3tools/client-runtime/operations";
 import { services } from "../rpc/catalog.ts";
+import { readThreadLaunchContext } from "../projects/launch-context.ts";
+import { connectionDiagnosticSummary } from "../management/connection-diagnostics.logic.ts";
 const decodeQuestionAttachments = Schema.decodeUnknownSync(UserInputAttachments);
 
 export interface TuiConnectionOptions {
@@ -126,6 +128,7 @@ export interface TuiConnectionOptions {
 }
 
 export interface ThreadLaunchOptions {
+  readonly environmentId?: EnvironmentId;
   readonly modelSelection?: ModelSelection;
   readonly context?: OrchestrationMessageContext;
   readonly attachments?: ReadonlyArray<ChatAttachment>;
@@ -627,8 +630,8 @@ export async function createTuiClient(options: TuiConnectionOptions = {}) {
     if (snapshot.selectedThreadId === null) throw new Error("Select a thread first.");
     return snapshot.selectedThreadId;
   };
-  const requireAvailableModel = (): ModelSelection => {
-    const provider = snapshot.config?.providers.find(
+  const requireAvailableModel = (config = snapshot.config): ModelSelection => {
+    const provider = config?.providers.find(
       (candidate) => candidate.enabled && candidate.installed && candidate.models.length > 0,
     );
     const model = provider?.models.find((candidate) => candidate.isDefault) ?? provider?.models[0];
@@ -640,21 +643,25 @@ export async function createTuiClient(options: TuiConnectionOptions = {}) {
   };
   const requireModel = () =>
     snapshot.thread?.thread.modelSelection ?? preferredModel ?? requireAvailableModel();
-  const requireNewThreadModel = (projectId: ProjectId) => {
-    const config = snapshot.config;
-    const project = snapshot.shell?.projects.find((value) => value.id === projectId);
+  const requireNewThreadModel = (
+    projectId: ProjectId,
+    config = snapshot.config,
+    shell = snapshot.shell,
+    preferred = preferredModel,
+  ) => {
+    const project = shell?.projects.find((value) => value.id === projectId);
     const settings = config
       ? resolveProjectSettings(config.settings, projectId, project).settings
       : null;
     const selection =
-      preferredModel ??
+      preferred ??
       settings?.defaultModelSelection ??
       project?.defaultModelSelection ??
-      requireAvailableModel();
+      requireAvailableModel(config);
     if (!config) return selection;
     return (
       resolveNewThreadModelSelection({
-        explicitSelection: preferredModel,
+        explicitSelection: preferred,
         defaultSelection: selection,
         fallbackSelection: settings?.fallbackModelSelection ?? null,
         providers: config.providers,
@@ -702,9 +709,9 @@ export async function createTuiClient(options: TuiConnectionOptions = {}) {
       stopFamily();
     };
   };
-  const selectEnvironment = async (id: string) => {
+  const ensureEnvironment = async (id: string) => {
     const targetId = EnvironmentId.make(id);
-    const target = await run(
+    return run(
       EnvironmentRegistry.EnvironmentRegistry.pipe(
         Effect.flatMap((connections) =>
           Effect.gen(function* () {
@@ -732,11 +739,21 @@ export async function createTuiClient(options: TuiConnectionOptions = {}) {
         ),
       ),
     );
+  };
+  const prepareThreadLaunch = async (id: string) => {
+    if (environmentId === id && snapshot.config && snapshot.shell)
+      return { environmentId, config: snapshot.config, shell: snapshot.shell };
+    const target = await ensureEnvironment(id);
+    const transport = createRpcBridge(runtime, registry, () => target.environmentId, observe);
+    return readThreadLaunchContext(transport, target.environmentId);
+  };
+  const selectEnvironment = async (id: string) => {
+    const target = await ensureEnvironment(id);
     clearViewedThread();
     for (const stop of stops) stop();
     stops.clear();
     stopThread = undefined;
-    environmentId = targetId;
+    environmentId = target.environmentId;
     preferredModel = null;
     update({
       environmentId,
@@ -916,7 +933,31 @@ export async function createTuiClient(options: TuiConnectionOptions = {}) {
           ];
         }),
       ),
+    connectionDiagnostics: async (id = requireEnvironment()) =>
+      run(
+        Effect.gen(function* () {
+          const connections = yield* EnvironmentRegistry.EnvironmentRegistry;
+          const entries = yield* SubscriptionRef.get(connections.entries);
+          const entry = entries.get(id);
+          if (!entry) throw new Error("This environment is no longer saved.");
+          const state = yield* connections.state(id);
+          const prepared = yield* connections.run(
+            id,
+            EnvironmentSupervisor.EnvironmentSupervisor.pipe(
+              Effect.flatMap((supervisor) => SubscriptionRef.get(supervisor.prepared)),
+            ),
+          );
+          return connectionDiagnosticSummary(entry, state, Option.getOrNull(prepared));
+        }),
+      ),
+    retryEnvironment: (id: EnvironmentId) =>
+      run(
+        EnvironmentRegistry.EnvironmentRegistry.pipe(
+          Effect.flatMap((connections) => connections.retryNow(id)),
+        ),
+      ),
     selectEnvironment,
+    prepareThreadLaunch,
     connect: async (pairingUrl: string) => {
       const id = await run(
         ConnectionOnboarding.ConnectionOnboarding.pipe(
@@ -935,6 +976,7 @@ export async function createTuiClient(options: TuiConnectionOptions = {}) {
     preferences: preferences.get,
     subscribePreferences: preferences.subscribe,
     updatePreferences: preferences.update,
+    updateThreadLayout: preferences.updateThreadLayout,
     stopSession: accessCommand(threadCommands.stopSession),
     access: {
       createPairingCredential: accessCommand(auth.createPairingCredential),
@@ -1064,9 +1106,13 @@ export async function createTuiClient(options: TuiConnectionOptions = {}) {
       message?: string,
       options?: ThreadLaunchOptions,
     ) => {
-      const destination = requireEnvironment();
+      const destination = options?.environmentId ?? requireEnvironment();
+      const preferred = destination === environmentId ? preferredModel : null;
+      const source = options?.environmentId ? await prepareThreadLaunch(destination) : snapshot;
       const id = ProjectId.make(projectId);
-      const modelSelection = options?.modelSelection ?? requireNewThreadModel(id);
+      const modelSelection =
+        options?.modelSelection ??
+        requireNewThreadModel(id, source.config, source.shell, preferred);
       const locals = [...(options?.localAttachments ?? [])];
       const attachments = [...(options?.attachments ?? [])];
       const context = options?.context;
@@ -1075,10 +1121,15 @@ export async function createTuiClient(options: TuiConnectionOptions = {}) {
       const messageId = options?.messageId;
       const requestedWorkspace = options?.workspaceStrategy;
       const requestedRuntime = options?.runtimeMode;
-      const config = snapshot.config;
-      const project = snapshot.shell?.projects.find((value) => value.id === id);
+      const config = source.config;
+      const project = source.shell?.projects.find((value) => value.id === id);
       const projectHasThreads =
-        snapshot.shell?.threads.some((value) => value.projectId === id) ?? false;
+        (source.shell?.threads.some((value) => value.projectId === id) ?? false) ||
+        (source.shell?.olderSettled?.counts.some(
+          (value) => value.projectId === id && value.count > 0,
+        ) ??
+          false);
+      if (!project) throw new Error("This project is no longer available on the selected machine.");
       const invokeAtDestination = createRpcBridge(
         runtime,
         registry,
@@ -1120,7 +1171,11 @@ export async function createTuiClient(options: TuiConnectionOptions = {}) {
           if (
             resolveSendEnvMode({ requestedEnvMode: mode, isGitRepo: status.isRepo }) === "worktree"
           )
-            workspaceStrategy = { type: "worktree", baseRef: status.refName ?? "HEAD" };
+            workspaceStrategy = {
+              type: "worktree",
+              baseRef: status.refName ?? "HEAD",
+              startFromOrigin: resolved.settings.newWorktreesStartFromOrigin,
+            };
         }
       }
       const uploaded = locals.length ? await run(localUploads.prepare(destination, locals)) : [];

@@ -68,6 +68,8 @@ describe("terminal preferences", () => {
           unsubscribe();
           const reopened = yield* Effect.promise(() => createPreferences(directory));
           expect(reopened.get()).toEqual({
+            threadLayouts: {},
+            threadDetailsItems: {},
             icons: "nerd",
             theme: "light",
             sendShortcut: "ctrl-s",
@@ -104,6 +106,45 @@ describe("terminal preferences", () => {
           expect(yield* Effect.promise(() => NodeFSP.readFile(credentialFile, "utf8"))).toBe(
             credentials,
           );
+        }),
+      ),
+  );
+
+  it.effect(
+    "persists scoped thread panels while preserving another terminal's layout and preferences",
+    () =>
+      withDirectory((directory) =>
+        Effect.gen(function* () {
+          const first = yield* Effect.promise(() => createPreferences(directory));
+          const second = yield* Effect.promise(() => createPreferences(directory));
+          const layout = {
+            workspaceOpen: true,
+            tab: "files" as const,
+            maximized: false,
+            openPath: "src/Größe.ts",
+            openLine: 42,
+          };
+          yield* Effect.promise(() => first.updateThreadLayout('["local","same-thread"]', layout));
+          yield* Effect.promise(() => second.update({ wordWrap: false }));
+          yield* Effect.promise(() =>
+            second.updateThreadLayout('["remote","same-thread"]', {
+              ...layout,
+              tab: "git",
+              maximized: true,
+            }),
+          );
+          yield* Effect.promise(() =>
+            first.updateThreadLayout('["local","same-thread"]', {
+              ...layout,
+              workspaceOpen: false,
+            }),
+          );
+          const reopened = yield* Effect.promise(() => createPreferences(directory));
+          expect(reopened.get().threadLayouts).toEqual({
+            '["local","same-thread"]': { ...layout, workspaceOpen: false },
+            '["remote","same-thread"]': { ...layout, tab: "git", maximized: true },
+          });
+          expect(reopened.get().wordWrap).toBe(false);
         }),
       ),
   );

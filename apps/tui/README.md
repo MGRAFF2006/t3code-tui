@@ -28,6 +28,12 @@ For local development, start `vp run dev` separately and use the server address 
 
 The left sidebar lists threads across projects, using T3's shared pinned and active ordering. Its filter includes Working, Active, Settled, Snoozed and Archived. The header's **Views** menu switches between conversation, workspace, pull requests, issues, scheduled tasks, settings and browser. Conversation stays central; Changes, Files, Git, Browser, Terminals and Devices can open alongside it on wide terminals or fill the main pane on smaller ones. Right-click a thread for its actions. **Ctrl+P** searches commands, including project creation/settings and server conversation search.
 
+**New thread** lets you choose its destination machine, project and workspace before creating it. Keep the project default, use its main checkout, select an existing worktree, or create a worktree with a chosen base branch and remote starting point. **Compose initial prompt** can submit in the background and leave a fresh draft with the same launch options.
+
+**Ctrl+P → Thread details** opens workspace, branch, linked PR/issue, changes, server and relationship information. **Configure rows**, also in Terminal Settings, chooses visible rows or restores defaults. Each thread's workspace panel, active tab, file and maximized state are saved on this computer. **Go back** and **Go forward** in Commands or Views revisit threads and sections, including saved environments; **Alt+[** and **Alt+]** are their shortcuts.
+
+Use **Linked pull requests and issues** in thread actions or Commands to link, inspect and unlink references. PR and issue list actions also link the selected item to the current thread. Linking preserves the workspace; PR checkout remains a separate Git action.
+
 Thread actions include configured snooze presets, custom times and durations, unsnooze, wake dismissal, and **Reorder thread**. Reordering persists within the pinned or active section across projects. Dismissing a wake clears that notification without opening the conversation.
 
 Sidebar search and **Ctrl+K** use T3's desktop matching for titles, projects, branches and pull requests. Search spans the selected environment's non-archived shelves; clearing it restores the sidebar filter. Message-history matches appear under **In messages** with a snippet and open find at the matching message. Message search needs a word of at least three letters, or two for Chinese, Japanese and Korean. Press Escape to clear sidebar search.
@@ -36,21 +42,26 @@ Drag either sidebar's divider to resize it. For exact widths, right-click a divi
 
 A red **●** on a thread, its header or the Terminals view means a command is running in one of its terminals; a number counts busy terminals. Click the indicator, or use **Ctrl+P → Show thread terminals**, to view its sessions. An idle shell has no red indicator. Activity follows the selected environment and clears when a command stops or terminal access is unavailable.
 
-| Shortcut | Action                                                                        |
-| -------- | ----------------------------------------------------------------------------- |
-| Ctrl+K   | Switch thread                                                                 |
-| Ctrl+N   | New thread                                                                    |
-| Ctrl+B   | Show/hide sidebar; open thread picker in narrow windows                       |
-| Ctrl+E   | Show/hide workspace panel                                                     |
-| Ctrl+T   | Attach the thread's interactive terminal                                      |
-| F6       | Move focus between panes                                                      |
-| Alt+1…7  | Threads, Workspace, Pull requests, Issues, Scheduled tasks, Settings, Browser |
-| F1       | Keyboard help                                                                 |
-| Ctrl+Q   | Quit                                                                          |
+| Shortcut      | Action                                                                        |
+| ------------- | ----------------------------------------------------------------------------- |
+| Ctrl+K        | Switch thread                                                                 |
+| Ctrl+N        | New thread                                                                    |
+| Ctrl+B        | Show/hide sidebar; open thread picker in narrow windows                       |
+| Ctrl+E        | Show/hide workspace panel                                                     |
+| Ctrl+T        | Attach the thread's interactive terminal                                      |
+| F6            | Move focus between panes                                                      |
+| Alt+1…7       | Threads, Workspace, Pull requests, Issues, Scheduled tasks, Settings, Browser |
+| Alt+[ / Alt+] | Back / Forward                                                                |
+| F1            | Keyboard help                                                                 |
+| Ctrl+Q        | Quit                                                                          |
 
 Pickers support search, arrows, Enter, Escape and the mouse. Forms use Tab to change fields, arrows to choose options, and **Ctrl+S** or **F2** to apply. Multiline form fields use Enter for a new line. Focused fields scroll into view.
 
 In conversation, Enter sends and **Alt+Enter** inserts a line break; enhanced keyboards also support Shift+Enter. **F2** opens delivery choices, including sending to multiple models in separate worktrees. **F3** manages local attachments and **F4** opens saved prompts. Ctrl+F searches the current conversation, Ctrl+G moves to the next match and Ctrl+Shift+G moves back. Ctrl+A selects all text in the focused input or editor. `/requests` focuses approvals and questions; In conversation, Ctrl+A outside an editor also focuses requests. Ctrl+J manages queued messages, Ctrl+O opens the work log, and Ctrl+X stops a turn. PageUp/PageDown scroll history; Ctrl+Home/End jumps to its ends. Settings → Terminal changes sending, follow-up delivery, icons, wrapping, diff layout and dark/light theme.
+
+Find updates as conversation content changes and highlights exact occurrences. While find is open, messages and plans use searchable text; Escape restores their normal Markdown presentation.
+
+**Edit earlier prompt** in the delivery menu, or a dispatched message's **Edit** action, rewinds to its preceding checkpoint before restoring the prompt for editing. Choose whether to restore workspace files too, then confirm. Existing draft text is kept, and the prompt returns only after the server confirms the rewind. Restored attachments use private local copies within preview limits; expired or oversized attachments need recovery before rewinding.
 
 Consecutive tool and reasoning activity collapses into a work group. Expand a group or individual item to read its details and live command output; **Expand work** opens all groups. Messages, requests, plans and important notices remain separate. Drafts and saved prompts persist privately on this computer. `/clear` starts fresh agent context on the next send; `/compact` compacts the current context when the provider supports it.
 
@@ -67,6 +78,12 @@ With an empty composer, **Up/Down** at its first/last visual line recalls sent p
 ## Workflows
 
 Provider and conversation warnings offer recovery actions through **Actions**, **Recovery**, or `/status` followed by Tab. Open the selected provider's setup, refresh its status, inspect the full error, or restore a dismissed notice. For usage limits, **Resume at reset** and **Snooze until reset** are independent choices; **Cancel auto-resume** and **Wake now** reverse them. ChatGPT account usage management opens in your browser.
+
+When an interrupted or usage-limited turn can continue, **Resume thread**, `/resume`, or sending with an empty composer resumes it. Pending requests and active work must be resolved first. A held queue resumes after the continuation is accepted.
+
+PR and issue lists support named **Saved views** for their project, filters and sorting. PR lists refresh when the server reports changes; if live refresh fails, **R** refreshes manually. PR actions expose commits and older comments within review conversations where the source host supports paging.
+
+**Settings → Maintenance** includes the terminal/server version, packaged open-source licenses and retained warning/error span logs. **Connection diagnostics** in Connections Settings or Commands explains saved routes and protocol recovery; connection errors also offer **Recovery**. Updating the host or client remains a separate action.
 
 | Area              | Native terminal controls                                                                                                                                                                                                                                                                                                                |
 | ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -113,7 +130,7 @@ Electron can render a BrowserWindow into a bitmap using [offscreen rendering](ht
 
 The [desktop compatibility audit](https://github.com/MGRAFF2006/t3code-tui/issues/1) uses desktop features as its target and records native controls, explicit graphical handoffs, missing behavior and verification evidence separately. The command palette’s **Developer → Service inspector** retains typed access to less common operations; this is an advanced request editor, not dedicated interface parity.
 
-Remaining gaps include editing/resending dispatched messages, a durable offline send queue, exact inline search highlighting, dictation, custom themes and remapping the terminal’s own shortcuts. Advanced PR review controls, some connection-host administration and embedded MCP app interfaces also remain partial. Server web/desktop keybindings can be edited here; they do not remap TUI controls.
+Remaining gaps include a durable offline send queue, dictation, custom themes and remapping the terminal’s own shortcuts. Advanced PR review controls, some connection-host administration and embedded MCP app interfaces also remain partial. Server web/desktop keybindings can be edited here; they do not remap TUI controls.
 
 Shared browser interaction and device display/input remain missing from this client. Opening a browser URL locally does not carry the shared browser's profile or session. Device management controls do not open a simulator view. Desktop window/tray controls and screen-selection gestures also remain unavailable. Text/source, supported image assets and cached notebook cells render natively; executable notebook output, office-document layout and media playback use explicit external viewers. The terminal owns fonts and opacity. Interface text is currently English; server/provider content retains its original language.
 

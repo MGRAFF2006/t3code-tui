@@ -10,7 +10,24 @@ import {
   writePrivateFile,
 } from "../connections/files.ts";
 
+const ThreadLayout = Schema.Struct({
+  workspaceOpen: Schema.Boolean,
+  tab: Schema.Literals(["changes", "files", "git", "browser", "terminals", "devices", "details"]),
+  maximized: Schema.Boolean,
+  openPath: Schema.NullOr(Schema.String.check(Schema.isMaxLength(4096))),
+  openLine: Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)),
+});
+export type TuiThreadLayout = typeof ThreadLayout.Type;
+export const threadLayoutKey = (environmentId: string, threadId: string) =>
+  JSON.stringify([environmentId, threadId]);
+
 const Preferences = Schema.Struct({
+  threadDetailsItems: Schema.Record(Schema.String, Schema.Boolean).pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
+  ),
+  threadLayouts: Schema.Record(Schema.String, ThreadLayout)
+    .check(Schema.makeFilter((value) => Object.keys(value).length <= 500))
+    .pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   sidebarWidth: Schema.Int.check(Schema.isBetween({ minimum: 22, maximum: 1000 })).pipe(
     Schema.withDecodingDefault(Effect.succeed(29)),
   ),
@@ -65,10 +82,8 @@ export async function createPreferences(configDir: string) {
   let preferences = await read();
   const listeners = new Set<(value: TuiPreferences) => void>();
   let pending: Promise<unknown> = Promise.resolve();
-  function update(patch: TuiPreferencesPatch): Promise<TuiPreferences> {
+  function change(transform: (current: TuiPreferences) => TuiPreferences): Promise<TuiPreferences> {
     const save = pending.then(async () => {
-      if (Object.keys(patch).some((key) => !Object.hasOwn(DEFAULT_TUI_PREFERENCES, key)))
-        throw new Error("Unknown terminal preference.");
       const lockPath = `${filename}.lock`;
       let lock;
       try {
@@ -81,7 +96,7 @@ export async function createPreferences(configDir: string) {
       }
       try {
         const latest = await read();
-        const next = decodePreferences({ ...latest, ...patch });
+        const next = decodePreferences(transform(latest));
         await writePrivateFile(filename, encodeDocument({ version: 1, settings: next }));
         preferences = next;
         for (const listener of listeners) listener(next);
@@ -96,7 +111,21 @@ export async function createPreferences(configDir: string) {
   }
   return {
     get: () => preferences,
-    update,
+    update: (patch: TuiPreferencesPatch) => {
+      if (Object.keys(patch).some((key) => !Object.hasOwn(DEFAULT_TUI_PREFERENCES, key)))
+        return Promise.reject(new Error("Unknown terminal preference."));
+      return change((latest) => ({ ...latest, ...patch }));
+    },
+    updateThreadLayout: (key: string, layout: TuiThreadLayout) =>
+      change((latest) => ({
+        ...latest,
+        threadLayouts: Object.fromEntries(
+          [
+            ...Object.entries(latest.threadLayouts).filter(([scope]) => scope !== key),
+            [key, layout],
+          ].slice(-500),
+        ),
+      })),
     subscribe: (listener: (value: TuiPreferences) => void) => {
       listeners.add(listener);
       listener(preferences);

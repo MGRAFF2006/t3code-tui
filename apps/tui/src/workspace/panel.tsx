@@ -16,8 +16,16 @@ import {
   terminalActivityLabel,
 } from "../presentation/terminal-activity.ts";
 import { TerminalActivity } from "../ui/terminal-activity.tsx";
+import { ThreadDetailsPanel } from "../features/thread-details.tsx";
 
-export type WorkspaceTab = "changes" | "files" | "git" | "browser" | "terminals" | "devices";
+export type WorkspaceTab =
+  | "changes"
+  | "files"
+  | "git"
+  | "browser"
+  | "terminals"
+  | "devices"
+  | "details";
 const tabs = [
   { id: "changes", title: "Changes" },
   { id: "files", title: "Files" },
@@ -25,18 +33,25 @@ const tabs = [
   { id: "browser", title: "Browser" },
   { id: "terminals", title: "Terminals" },
   { id: "devices", title: "Devices" },
+  { id: "details", title: "Details" },
 ] as const;
 
 export function WorkspacePanel(
   props: FeatureProps & {
     initialTab?: WorkspaceTab | undefined;
+    onTabChange?: (tab: WorkspaceTab) => void;
     openPath?: string | undefined;
     openLine?: number | undefined;
     compact?: boolean | undefined;
+    visible?: boolean | undefined;
   },
 ) {
   const dimensions = useTerminalDimensions();
-  const [tab, setTab] = createSignal<WorkspaceTab>(props.initialTab ?? "changes");
+  const [tab, setTabState] = createSignal<WorkspaceTab>(props.initialTab ?? "changes");
+  function setTab(value: WorkspaceTab) {
+    setTabState(value);
+    props.onTabChange?.(value);
+  }
   const [status, setStatus] = createSignal<WorkspaceStatus>({ local: null, remote: null });
   const [error, setError] = createSignal("");
   const cwd = createMemo(() => workspaceRoot(props.state()));
@@ -50,7 +65,7 @@ export function WorkspacePanel(
     on(
       () => props.initialTab,
       (value) => {
-        if (value) setTab(value);
+        if (value) setTabState(value);
       },
     ),
   );
@@ -193,6 +208,16 @@ export function WorkspacePanel(
       </Show>
       <Show when={tab() === "browser"}>
         <BrowserPanel {...props} />
+      </Show>
+      <Show when={tab() === "details" && props.visible !== false}>
+        <ThreadDetailsPanel
+          {...props}
+          cwd={cwd}
+          status={status}
+          mutation={mutation}
+          refresh={refresh}
+          openTab={setTab}
+        />
       </Show>
       <ChangesPanel
         {...props}

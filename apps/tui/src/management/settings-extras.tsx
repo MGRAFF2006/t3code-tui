@@ -33,6 +33,8 @@ import { setPairingTokenOnUrl } from "@t3tools/shared/remote";
 import { usageSettingsActions } from "./usage-settings.ts";
 import { secretSettingsActions } from "./secrets.tsx";
 import { resourceActions } from "./resources.ts";
+import { aboutActions } from "./about.ts";
+import { serverLogActions } from "./logs.ts";
 
 const permissionLabels: Record<AuthEnvironmentScope, string> = {
   "orchestration:read": "Read projects and threads",
@@ -560,6 +562,16 @@ export function createSettingsExtras(
               },
             ]
           : []),
+        {
+          title: "About T3 Code",
+          description: "Terminal and server versions, environment and open-source licenses.",
+          run: () => aboutActions(props),
+        },
+        {
+          title: "Server span logs",
+          description: "Recent warning and error events from retained trace files.",
+          run: () => void props.ui.run(() => serverLogActions(props)),
+        },
         { title: "Process diagnostics", run: processActions },
         { title: "CPU, memory and resource history", run: () => resourceActions(props) },
         {

@@ -38,7 +38,13 @@ export function createProjectScope(props: FeatureProps) {
       })),
     );
   }
-  return { project, choose };
+  function select(projectId: ProjectId) {
+    const environment = props.state()?.environmentId;
+    if (!environment || !props.state()?.shell?.projects.some((entry) => entry.id === projectId))
+      throw new Error("This project is no longer available on the selected environment.");
+    setSelection({ environment, projectId });
+  }
+  return { project, choose, select };
 }
 
 export function Action(props: { label: string; onPress: () => void; muted?: boolean }) {

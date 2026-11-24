@@ -1,10 +1,16 @@
 import { scrollbarOptions } from "../ui/scroll.ts";
-import type { Renderable, ScrollBoxRenderable, TextareaRenderable } from "@opentui/core";
-import { decodePasteBytes, stripAnsiSequences, type PasteEvent } from "@opentui/core";
+import type {
+  Renderable,
+  ScrollBoxRenderable,
+  TextareaRenderable,
+  TextRenderable,
+} from "@opentui/core";
+import { decodePasteBytes, stripAnsiSequences, TextBuffer, type PasteEvent } from "@opentui/core";
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/solid";
 import { createEffect, createMemo, createSignal, For, on, onCleanup, Show } from "solid-js";
 import {
   CommandId,
+  AuthOrchestrationOperateScope,
   COMPOSER_CONTEXT_MAX_RECORDS,
   ORCHESTRATION_V2_WS_METHODS,
   WS_METHODS,
@@ -13,7 +19,6 @@ import {
   type OrchestrationV2ProjectedTurnItem,
   type OrchestrationV2ThreadProjection,
   type OrchestrationV2PromptSuggestion,
-  type OrchestrationV2SearchThreadResult,
   type RuntimeMode,
   type ModelSelection,
   type OrchestrationMessageContext,
@@ -49,6 +54,11 @@ import { request, subscribe } from "../rpc/request.ts";
 import { theme } from "../theme/index.ts";
 import { Transcript, turnItemText } from "../transcript.tsx";
 import { createConversationGoals } from "./goals.tsx";
+import { conversationContinuation, continueConversation } from "./continuation.ts";
+import { conversationRewindTargets, restoredRewindDraft } from "./rewind.logic.ts";
+import { waitForConversationRewind } from "./rewind.ts";
+import { stageRewindAttachments } from "./rewind-attachments.ts";
+import { CLOSED_CONVERSATION_FIND, createConversationFind } from "./find.ts";
 import { createPromptHistoryNavigation, isPromptHistoryCaretAtEdge } from "./prompt-history.ts";
 import { getComposerPromptLengthFeedback } from "./prompt-length.ts";
 import {
@@ -180,10 +190,10 @@ function ThreadConversation(
   const [fanoutRevision, setFanoutRevision] = createSignal(0);
   const [suggestion, setSuggestion] = createSignal<OrchestrationV2PromptSuggestion>(null);
   const [dismissedSuggestion, setDismissedSuggestion] = createSignal<string | null>(null);
-  const [findQuery, setFindQuery] = createSignal("");
-  const [findResult, setFindResult] = createSignal<OrchestrationV2SearchThreadResult | null>(null);
-  const [finding, setFinding] = createSignal(false);
-  let findGeneration = 0;
+  const [findState, setFindState] = createSignal(CLOSED_CONVERSATION_FIND);
+  const findQuery = () => findState().query;
+  const findResult = () => findState().result;
+  const finding = () => findState().searching;
   const [retryingPreparation, setRetryingPreparation] = createSignal<ReadonlySet<string>>(
     new Set(),
   );
@@ -192,6 +202,21 @@ function ThreadConversation(
   const rows = new Map<string, Renderable>();
   const thread = () => props.projection().thread;
   const queue = createMemo(() => deriveThreadQueueWorkflowState(props.projection()));
+  const continuation = createMemo(() => conversationContinuation(props.projection()));
+  const [canOperate, setCanOperate] = createSignal(false);
+  createEffect(
+    on(
+      () => props.state()?.environmentId,
+      (destination) => {
+        setCanOperate(false);
+        if (destination && destination === environmentId)
+          onCleanup(props.client.observeScope(AuthOrchestrationOperateScope, setCanOperate));
+      },
+    ),
+  );
+  const showResume = () =>
+    continuation().available && !draft().trim() && attachments().length === 0 && !freshContext();
+
   const canSteer = createMemo(() => {
     const active = queue().activeRun;
     if (!active || freshContext()) return false;
@@ -556,30 +581,22 @@ function ThreadConversation(
           ((entry.item.type === "user_message" || entry.item.type === "assistant_message") &&
             entry.item.messageId === entryId),
       );
-  async function findInThread(query: string, index = 0, entryId?: string) {
-    const generation = ++findGeneration;
-    const current = () =>
+  const find = createConversationFind({
+    threadId: destinationThreadId,
+    current: () =>
       !disposed &&
-      findGeneration === generation &&
       props.state()?.environmentId === environmentId &&
-      props.state()?.thread?.thread.id === destinationThreadId;
-    if (!current()) throw new Error("Return to this conversation to search it.");
-    const value = query.trim();
-    if (!value || value.length > 200)
-      throw new Error("Enter a search phrase of at most 200 characters.");
-    setFindQuery(value);
-    setFindResult(null);
-    setFinding(true);
-    try {
-      const result = await request(props.client, ORCHESTRATION_V2_WS_METHODS.searchThread, {
-        threadId: destinationThreadId,
-        query: value,
-        ...(entryId ? { start: { entryId, occurrence: 0 } } : { index }),
-      });
-      if (!current()) return;
-      setFindResult(result);
-      const match = result.match;
-      if (!match) return;
+      props.state()?.thread?.thread.id === destinationThreadId,
+    subscribe: (input, onValue, onError) =>
+      subscribe(
+        props.client,
+        ORCHESTRATION_V2_WS_METHODS.searchThreadStream,
+        input,
+        onValue,
+        onError,
+      ),
+    onChange: setFindState,
+    reveal: async (match, current) => {
       setFollowing(false);
       if (!findEntry(match.entryId)) {
         const loaded = await props.client.loadEarlier(match.entryId);
@@ -589,35 +606,51 @@ function ThreadConversation(
       const entry = findEntry(match.entryId);
       if (!entry)
         throw new Error("This match is not available in the loaded conversation history.");
-      const box = history;
-      box?.afterLayout(() => {
-        const node = rows.get(`${entry.sourceThreadId}/${entry.sourceItemId}`);
-        if (current() && box && !box.isDestroyed && node && !node.isDestroyed)
-          box.scrollChildIntoView(node, { align: "nearest", inset: 1 });
+    },
+  });
+  function revealFindMatch(node: TextRenderable, offset: number) {
+    const box = history;
+    box?.afterLayout(() => {
+      if (disposed || !findState().open || box.isDestroyed || node.isDestroyed) return;
+      const prefix = node.plainText.slice(0, offset);
+      const measure = TextBuffer.create(renderer.widthMethod, renderer.nativeScene);
+      let column: number;
+      try {
+        measure.setText(prefix);
+        column = measure.length;
+      } finally {
+        measure.destroy();
+      }
+      const lines = node.lineInfo;
+      let line = 0;
+      for (let index = 0; index < lines.lineSources.length; index += 1)
+        if (lines.lineStartCols[index]! <= column) line = index;
+      const y = node.y + line;
+      const x = node.x + column - (lines.lineStartCols[line] ?? 0);
+      const top = box.viewport.y;
+      const left = box.viewport.x;
+      box.scrollTo({
+        y:
+          y < top + 1 || y >= top + box.viewport.height - 1
+            ? box.scrollTop + y - top - 1
+            : box.scrollTop,
+        x: x < left || x >= left + box.viewport.width ? box.scrollLeft + x - left : box.scrollLeft,
       });
-    } finally {
-      if (current()) setFinding(false);
-    }
+    });
   }
+  onCleanup(find.dispose);
+  // Open find follows server-owned history changes, coalescing streamed deltas between searches.
+  createEffect(on(props.projection, find.changed, { defer: true }));
   function findPrompt() {
     props.ui.form({
       title: "Find in conversation",
       fields: [{ name: "query", label: "Words or phrase", value: findQuery(), required: true }],
       submitLabel: "Find",
-      onSubmit: async ({ query = "" }) => findInThread(query),
+      onSubmit: async ({ query = "" }) => find.open(query),
     });
   }
-  function stepFind(delta: number) {
-    const current = findResult();
-    if (!current?.totalMatches || finding()) return;
-    const index = (current.activeIndex + delta + current.totalMatches) % current.totalMatches;
-    void props.ui.run(() => findInThread(findQuery(), index));
-  }
-  function closeFind() {
-    findGeneration += 1;
-    setFindResult(null);
-    setFinding(false);
-  }
+  const stepFind = (delta: number) => find.step(delta);
+  const closeFind = () => find.close();
   let handledSearchTarget: ThreadSearchTarget | undefined;
   // Search navigation synchronizes the opened conversation with its server-owned message history.
   createEffect(() => {
@@ -631,7 +664,7 @@ function ThreadConversation(
       return;
     handledSearchTarget = target;
     props.onSearchTargetHandled?.(target);
-    void props.ui.run(() => findInThread(target.query, 0, target.messageId));
+    void props.ui.run(async () => find.open(target.query, target.messageId));
   });
   function savedPrompts() {
     const guard = () => {
@@ -815,6 +848,189 @@ function ThreadConversation(
       else release?.();
     }
   };
+  function guardRewind(ownOperation = false) {
+    if (
+      disposed ||
+      props.state()?.environmentId !== environmentId ||
+      props.state()?.thread?.thread.id !== destinationThreadId
+    )
+      throw new Error("Return to the original conversation to edit its prompts.");
+    if (props.state()?.connection !== "connected" || !canOperate())
+      throw new Error("Reconnect with permission to operate this conversation before rewinding.");
+    if ((!ownOperation && sending()) || stagingPasteCount() > 0)
+      throw new Error("Wait for the current message and its attachments to finish preparing.");
+    if (queue().activeRun)
+      throw new Error("Stop the active turn before rewinding the conversation.");
+    if (provider()?.supportsConversationRollback === false)
+      throw new Error(
+        "This provider cannot rewind conversation history. Start a new thread instead.",
+      );
+  }
+  function rewindPrompt(entry: OrchestrationV2ProjectedTurnItem) {
+    void props.ui.run(async () => {
+      guardRewind();
+      const target = conversationRewindTargets(props.projection()).find(
+        (target) =>
+          target.entry.sourceItemId === entry.sourceItemId &&
+          target.entry.sourceThreadId === entry.sourceThreadId,
+      );
+      if (!target)
+        throw new Error(
+          "This prompt has no available rewind point. Load earlier history or start a new thread.",
+        );
+      const prepare = (restoreFiles: boolean) =>
+        props.ui.confirm(
+          restoreFiles ? "Rewind conversation and files?" : "Rewind conversation?",
+          `Return to before this prompt and restore it in the composer for editing. Later messages will be removed.${restoreFiles ? " Tracked workspace files also return to that point." : " Workspace files stay as they are."} Your current draft is kept.`,
+          async () => {
+            guardRewind();
+            const initial = props.projection();
+            const activeProviderThreadId = initial.thread.activeProviderThreadId;
+            const witness = initial.runs.findLast((run) => run.status !== "rolled_back");
+            const message = target.entry.item;
+            restoredRewindDraft(captureDraft(), message, []);
+            if (
+              attachments().length + message.attachments.length >
+              PROVIDER_SEND_TURN_MAX_ATTACHMENTS
+            )
+              throw new Error("Make room for this prompt's attachments before rewinding.");
+            const capabilities = props.state()?.config?.environment.capabilities;
+            if (
+              message.attachments.some((attachment) => attachment.type === "file") &&
+              !capabilities?.fileAttachments
+            )
+              throw new Error("This environment cannot restore file attachments for sending.");
+            if (
+              message.attachments.some((attachment) => attachment.type === "image") &&
+              capabilities?.attachmentUploads !== true
+            )
+              throw new Error("This environment cannot restore image attachments for sending.");
+            let staged: Awaited<ReturnType<typeof stageRewindAttachments>> | undefined;
+            pendingSends.add(props.scope);
+            setSending(true);
+            try {
+              staged = await stageRewindAttachments({
+                directory: props.client.localStateDirectory,
+                attachments: message.attachments,
+                maxFileBytes: capabilities?.fileAttachments?.maxUploadBytes ?? 0,
+                read: async (attachment) => {
+                  guardRewind(true);
+                  const asset = await props.client.readAsset({
+                    _tag: "attachment",
+                    attachmentId: attachment.id,
+                    fileName: attachment.name,
+                    mimeType: attachment.mimeType,
+                  });
+                  guardRewind(true);
+                  return asset.bytes;
+                },
+              });
+              guardRewind(true);
+              const live = props.projection();
+              const currentTarget = conversationRewindTargets(live).find(
+                (candidate) => candidate.entry.sourceItemId === target.entry.sourceItemId,
+              );
+              if (
+                live.thread.activeProviderThreadId !== activeProviderThreadId ||
+                live.runs.findLast((run) => run.status !== "rolled_back")?.id !== witness?.id ||
+                currentTarget?.checkpoint.id !== target.checkpoint.id
+              )
+                throw new Error("The conversation changed. Select the prompt to rewind again.");
+              restoredRewindDraft(captureDraft(), message, staged.attachments);
+              const transport = props.client.captureTransport();
+              const commandId = id();
+              await waitForConversationRewind({
+                projection: live,
+                commandId,
+                turnCount: target.checkpoint.appRunOrdinal ?? 0,
+                subscribe: (onValue, onError) =>
+                  subscribe(
+                    transport,
+                    ORCHESTRATION_V2_WS_METHODS.subscribeThread,
+                    { threadId: destinationThreadId, acceptBoundedSnapshot: true },
+                    onValue,
+                    onError,
+                  ),
+                dispatch: () =>
+                  request(transport, ORCHESTRATION_V2_WS_METHODS.dispatchCommand, {
+                    type: "checkpoint.rollback",
+                    commandId,
+                    threadId: destinationThreadId,
+                    checkpointId: target.checkpoint.id,
+                    scopeId: target.checkpoint.scopeId,
+                    restoreFiles,
+                  }),
+              });
+              const current =
+                draftOwners.get(props.scope) === owner
+                  ? captureDraft()
+                  : (drafts.get(props.scope) ?? initialDraft);
+              const next = restoredRewindDraft(current, message, staged.attachments);
+              drafts.set(props.scope, next);
+              persistence.save(props.scope, next);
+              staged.retain();
+              draftOwners.get(props.scope)?.apply(next);
+              await persistence.flush();
+              props.ui.notify(
+                `Prompt restored in ${initial.thread.title}. Edit it, then send when ready.`,
+              );
+              if (
+                !disposed &&
+                props.state()?.environmentId === environmentId &&
+                props.state()?.thread?.thread.id === destinationThreadId
+              ) {
+                props.onFocus();
+                composer?.gotoBufferEnd();
+                goBottom();
+              }
+            } finally {
+              pendingSends.delete(props.scope);
+              draftOwners.get(props.scope)?.settled();
+              await staged?.discard();
+            }
+          },
+          "Rewind and edit",
+        );
+      props.ui.choose("Edit earlier prompt", [
+        {
+          title: "Rewind conversation and edit",
+          description: "Keep workspace files; restore this prompt and its attachments for editing.",
+          run: () => prepare(false),
+        },
+        ...(target.checkpoint.status === "ready"
+          ? [
+              {
+                title: "Rewind conversation and files, then edit",
+                description: "Also restore tracked files. Available only in an isolated workspace.",
+                run: () => prepare(true),
+              },
+            ]
+          : []),
+        {
+          title: "View original prompt",
+          run: () => props.ui.text("Original prompt", turnItemText(target.entry.item)),
+        },
+      ]);
+    });
+  }
+  function editEarlierPrompt() {
+    void props.ui.run(async () => {
+      guardRewind();
+      const targets = conversationRewindTargets(props.projection());
+      if (!targets.length)
+        throw new Error(
+          "No dispatched prompt has an available rewind point. Load earlier history or start a new thread.",
+        );
+      props.ui.choose(
+        "Choose prompt to edit",
+        [...targets].reverse().map((target) => ({
+          title: target.entry.item.text.replaceAll("\n", " ").slice(0, 120) || "Attached files",
+          description: `Turn ${target.run.ordinal} · ${target.entry.item.attachments.length} attachments`,
+          run: () => rewindPrompt(target.entry),
+        })),
+      );
+    });
+  }
   const openItem = (entry: OrchestrationV2ProjectedTurnItem) => {
     const sourceThreadId = entry.sourceThreadId;
     const itemId = entry.sourceItemId;
@@ -824,6 +1040,13 @@ function ThreadConversation(
         itemId,
       });
       const value = result.item ?? entry.item;
+      if (value.type === "user_message" && entry.visibility === "local") {
+        props.ui.choose("Prompt", [
+          { title: "View full prompt", run: () => props.ui.text("Prompt", turnItemText(value)) },
+          { title: "Rewind and edit…", run: () => rewindPrompt(entry) },
+        ]);
+        return;
+      }
       if (value.type === "proposed_plan") {
         if (disposed) return;
         planActions(
@@ -1296,6 +1519,18 @@ function ThreadConversation(
     { title: "/work", description: "Inspect the work log", run: workLog },
     { title: "/goal", description: "Set, inspect or manage the provider's goal", run: goals.open },
     { title: "/find", description: "Find text in this conversation", run: findPrompt },
+    {
+      title: "/edit-prompt",
+      description: "Rewind and edit a dispatched prompt",
+      run: editEarlierPrompt,
+    },
+    {
+      title: "/resume",
+      description: "Resume interrupted work or release a held queue",
+      run: () => {
+        void props.ui.run(resume);
+      },
+    },
     { title: "/attach", description: "Attach a local image or file", run: attach },
     {
       title: "/paste-inline",
@@ -1377,9 +1612,42 @@ function ThreadConversation(
         })),
     );
   }
+  async function resume() {
+    if (sending()) return;
+    if (
+      disposed ||
+      props.state()?.environmentId !== environmentId ||
+      props.state()?.thread?.thread.id !== destinationThreadId
+    )
+      throw new Error("Return to this conversation to resume it.");
+    if (props.state()?.connection !== "connected" || !canOperate())
+      throw new Error("Reconnect with permission to operate this thread before resuming.");
+    const projection = props.projection();
+    const transport = props.client.captureTransport();
+    pendingSends.add(props.scope);
+    setSending(true);
+    try {
+      await continueConversation(projection, (value) =>
+        request(transport, ORCHESTRATION_V2_WS_METHODS.dispatchCommand, value),
+      );
+      if (
+        !disposed &&
+        props.state()?.environmentId === environmentId &&
+        props.state()?.thread?.thread.id === destinationThreadId
+      )
+        goBottom();
+    } finally {
+      pendingSends.delete(props.scope);
+      draftOwners.get(props.scope)?.settled();
+    }
+  }
   async function send(delivery?: "queue" | "steer" | "restart") {
     const text = composer?.plainText ?? draft();
-    if ((!text.trim() && attachments().length === 0) || sending()) return;
+    if (sending()) return;
+    if (!text.trim() && attachments().length === 0) {
+      if (showResume()) await resume();
+      return;
+    }
     if (stagingPasteCount() > 0)
       throw new Error("Wait for pasted text attachments to finish preparing.");
     const length = getComposerPromptLengthFeedback(text);
@@ -1623,11 +1891,26 @@ function ThreadConversation(
   function deliveryMenu() {
     fanoutRevision();
     const choices: Choice[] = [
+      ...(continuation().available
+        ? [
+            {
+              title: continuation().runId ? "Resume thread" : "Resume queued messages",
+              run: () => {
+                void props.ui.run(resume);
+              },
+            },
+          ]
+        : []),
       {
         title: queue().activeRun ? "Queue after current turn" : "Send message",
         run: () => {
           void props.ui.run(() => send(queue().activeRun ? "queue" : undefined));
         },
+      },
+      {
+        title: "Edit earlier prompt…",
+        description: "Rewind before a dispatched prompt and restore it for editing",
+        run: editEarlierPrompt,
       },
       {
         title: "Send to multiple models…",
@@ -1701,7 +1984,7 @@ function ThreadConversation(
       key.preventDefault();
       stepFind(key.shift ? -1 : 1);
     }
-    if (!requestFocus() && key.name === "escape" && findResult()) {
+    if (!requestFocus() && key.name === "escape" && findState().open) {
       key.preventDefault();
       closeFind();
       return;
@@ -1810,7 +2093,7 @@ function ThreadConversation(
       minHeight={0}
       onMouseDown={props.onFocus}
     >
-      <Show when={findQuery() && (findResult() || finding())}>
+      <Show when={findState().open}>
         <box height={1} paddingX={1} flexDirection="row" gap={2}>
           <text
             selectable={false}
@@ -1818,7 +2101,12 @@ function ThreadConversation(
             flexGrow={1}
             truncate
             onMouseDown={findPrompt}
-          >{`Find: ${findQuery()} · ${finding() ? "Searching…" : findResult()?.totalMatches ? `${findResult()!.activeIndex + 1}/${findResult()!.totalMatches}` : "No matches"}`}</text>
+          >{`Find: ${findQuery()} · ${findState().error ? `Failed: ${findState().error}` : finding() ? "Searching…" : findResult()?.totalMatches ? `${findResult()!.activeIndex + 1}/${findResult()!.totalMatches}` : "No matches"}`}</text>
+          <Show when={findState().error}>
+            <text selectable={false} fg={theme.primary} onMouseDown={() => find.retry()}>
+              Retry
+            </text>
+          </Show>
           <text selectable={false} fg={theme.primary} onMouseDown={() => stepFind(-1)}>
             Previous
           </text>
@@ -1892,10 +2180,14 @@ function ThreadConversation(
           wordWrap={preferences().wordWrap}
           timestampFormat={preferences().timestampFormat}
           toolCallVisibility={preferences().toolCallVisibility}
-          findActive={Boolean(findQuery() && (findResult() || finding()))}
+          findActive={findState().open}
+          findQuery={findState().open ? findQuery() : undefined}
+          highlightedOccurrence={findResult()?.match?.occurrence}
+          onFindMatch={revealFindMatch}
           expandAll={expandWork()}
           highlightedEntryId={findResult()?.match?.entryId}
           onOpenItem={openItem}
+          onEditPrompt={rewindPrompt}
           onLoadWork={loadWork}
           onCommandOutput={
             props.state()?.config?.environment.capabilities.commandOutputStreaming
@@ -2205,6 +2497,7 @@ function ThreadConversation(
                     { title: "Add context", run: contextMenu },
                     { title: "Saved prompts", run: savedPrompts },
                     { title: "Goal", run: goals.open },
+                    { title: "Edit earlier prompt", run: editEarlierPrompt },
                     { title: "Paste next text inline", run: () => setPasteInline(true) },
                     { title: "Model options", run: options },
                     {
@@ -2247,7 +2540,8 @@ function ThreadConversation(
             selectable={false}
             flexShrink={0}
             fg={
-              (draft().trim() || attachments().length > 0) && !sending()
+              (draft().trim() || attachments().length > 0 || (showResume() && canOperate())) &&
+              !sending()
                 ? theme.primary
                 : theme.textMuted
             }
@@ -2257,15 +2551,17 @@ function ThreadConversation(
           >
             {sending()
               ? "Sending…"
-              : queue().activeRun
-                ? preferences().followUpMode === "steer" && canSteer()
-                  ? "Steer"
-                  : "Queue"
-                : compactTokens() !== null
-                  ? "Compact and send"
-                  : preferences().sendShortcut === "ctrl-s"
-                    ? "Send ^S"
-                    : "Send ↵"}
+              : showResume()
+                ? "Resume thread"
+                : queue().activeRun
+                  ? preferences().followUpMode === "steer" && canSteer()
+                    ? "Steer"
+                    : "Queue"
+                  : compactTokens() !== null
+                    ? "Compact and send"
+                    : preferences().sendShortcut === "ctrl-s"
+                      ? "Send ^S"
+                      : "Send ↵"}
           </text>
         </box>
       </box>

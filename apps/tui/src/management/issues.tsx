@@ -14,6 +14,8 @@ import type { Choice, FeatureProps } from "../ui/controller.ts";
 import { request } from "../rpc/request.ts";
 import { theme } from "../theme/index.ts";
 import { reactionActions } from "./reactions.ts";
+import { issueThreadLinkChoice } from "../features/thread-links.ts";
+import { showSavedViews, type IssueBrowseFilters } from "./saved-views.ts";
 import {
   Action,
   createProjectScope,
@@ -32,14 +34,14 @@ export function IssuesPanel(props: FeatureProps) {
   const scope = createProjectScope(props);
   const environment = createMemo(() => props.state()?.environmentId);
   const projectId = createMemo(() => scope.project()?.id);
-  const [filter, setFilter] = createSignal<{
-    state: "open" | "closed" | "all";
-    involvement: "all" | "assigned" | "authored" | "mentioned";
-    query: string;
-    labels: string;
-    assignee: string;
-    sort: "created" | "updated";
-  }>({ state: "open", involvement: "all", query: "", labels: "", assignee: "", sort: "updated" });
+  const [filter, setFilter] = createSignal<IssueBrowseFilters>({
+    state: "open",
+    involvement: "all",
+    query: "",
+    labels: "",
+    assignee: "",
+    sort: "updated",
+  });
   const [revision, setRevision] = createSignal(0);
   const [result, setResult] = createSignal<IssueListResult | null>(null);
   const [failure, setFailure] = createSignal<string | null>(null);
@@ -131,6 +133,28 @@ export function IssuesPanel(props: FeatureProps) {
   function refresh() {
     setRevision((value) => value + 1);
   }
+  function savedViews() {
+    const environmentId = environment();
+    const id = projectId();
+    if (!environmentId || !id) return;
+    void props.ui.run(() =>
+      showSavedViews(
+        props,
+        {
+          kind: "issues",
+          environmentId,
+          projectId: id,
+          filters: filter(),
+        },
+        (view) => {
+          if (view.kind !== "issues") return;
+          scope.select(view.projectId);
+          setFilter(view.filters);
+          setSelection("");
+        },
+      ),
+    );
+  }
   function search() {
     const value = filter();
     props.ui.form({
@@ -208,10 +232,11 @@ export function IssuesPanel(props: FeatureProps) {
       if (current !== generation) return;
       const merged = new Map(previous.entries.map((entry) => [issueKey(entry), entry]));
       for (const entry of next.entries) merged.set(issueKey(entry), entry);
+      const timestamp = payload.sort === "created" ? "createdAt" : "updatedAt";
       setResult({
         ...next,
         entries: [...merged.values()].toSorted((left, right) =>
-          right.updatedAt.localeCompare(left.updatedAt),
+          right[timestamp].localeCompare(left[timestamp]),
         ),
         scopes: previous.scopes ?? next.scopes,
       });
@@ -370,7 +395,7 @@ export function IssuesPanel(props: FeatureProps) {
     if (!value || !selected() || issueKey(value) !== issueKey(selected()!)) return;
     const ref = refOf(value);
     const guard = destinationGuard(props);
-    const options: Choice[] = [];
+    const options: Choice[] = issueThreadLinkChoice(props, value);
     async function mutate(action: () => Promise<unknown>) {
       guard();
       await action();
@@ -583,6 +608,7 @@ export function IssuesPanel(props: FeatureProps) {
     if (event.name === "/" || event.name === "f") search();
     else if (event.name === "p") scope.choose();
     else if (event.name === "r") refresh();
+    else if (event.name === "v") savedViews();
     else if (event.name === "n") createIssue();
     else if (event.name === "m") loadMore();
     else if (event.name === "a") actions();
@@ -595,7 +621,7 @@ export function IssuesPanel(props: FeatureProps) {
 
   return (
     <box flexGrow={1} flexDirection="column" minHeight={0} onMouseDown={props.onFocus}>
-      <box padding={1} flexDirection="row" justifyContent="space-between" gap={2}>
+      <box padding={1} flexDirection="row" flexWrap="wrap" justifyContent="space-between" gap={2}>
         <text fg={theme.text} attributes={1}>
           Issues
         </text>
@@ -605,27 +631,28 @@ export function IssuesPanel(props: FeatureProps) {
         />
         <Action label="New issue [n]" onPress={createIssue} />
         <Action label="Search [/]" onPress={search} />
+        <Action label="Saved views [v]" onPress={savedViews} />
       </box>
-      <text fg={theme.textMuted} paddingX={1}>
+      <text height={1} flexShrink={0} truncate fg={theme.textMuted} paddingX={1}>
         {filter().state} · {filter().involvement}
         {filter().query ? ` · ${filter().query}` : ""}
         {loading() ? " · Loading…" : ""}
       </text>
       <Show when={failure()}>
-        <text fg={theme.error} paddingX={1} wrapMode="word">
+        <text flexShrink={0} fg={theme.error} paddingX={1} wrapMode="word">
           {failure()}
         </text>
       </Show>
       <For each={result()?.errors}>
         {(error) => (
-          <text fg={theme.warning} paddingX={1} wrapMode="word">
+          <text flexShrink={0} fg={theme.warning} paddingX={1} wrapMode="word">
             {error.projectTitle}: {error.message}
           </text>
         )}
       </For>
       <For each={result()?.trackers.filter((tracker) => !tracker.configured)}>
         {(tracker) => (
-          <text fg={theme.warning} paddingX={1} wrapMode="word">
+          <text flexShrink={0} fg={theme.warning} paddingX={1} wrapMode="word">
             {tracker.host}: {tracker.detail ?? "Issue tracker is not configured."}
           </text>
         )}
@@ -785,7 +812,8 @@ export function IssuesPanel(props: FeatureProps) {
         </box>
       </Show>
       <text fg={theme.textMuted} paddingX={1}>
-        ↑↓ select · → details · ← list · enter actions · n new · / search · p project · r refresh
+        ↑↓ select · → details · ← list · enter actions · n new · / search · v views · p project · r
+        refresh
       </text>
     </box>
   );

@@ -1,25 +1,37 @@
 import { selectOptionAtPointer, scrollSelectOptions } from "../ui/native-select.ts";
 import { scrollbarOptions } from "../ui/scroll.ts";
 import { useKeyboard } from "@opentui/solid";
-import { createEffect, createMemo, createSignal, For, onCleanup, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, onCleanup, Show, untrack } from "solid-js";
 import {
   WS_METHODS,
+  pullRequestConversationThreads,
   type PullRequestAction,
   type PullRequestActivity,
   type PullRequestDetail,
+  type PullRequestDiffStat,
   type PullRequestListEntry,
   type PullRequestListResult,
   type PullRequestRef,
 } from "@t3tools/contracts";
+import { PullRequestListSort } from "@t3tools/client-runtime/pull-request-list-preferences";
+import {
+  sortPullRequestGroups,
+  type PullRequestGroup,
+} from "@t3tools/client-runtime/pull-request-list-sort";
 import type { Choice, FeatureProps } from "../ui/controller.ts";
-import { request } from "../rpc/request.ts";
+import { request, subscribe } from "../rpc/request.ts";
 import { theme } from "../theme/index.ts";
 import { PullRequestDiffPanel } from "./pr-diff.tsx";
 import { reactionActions } from "./reactions.ts";
+import { pullRequestThreadLinkChoice } from "../features/thread-links.ts";
+import { showSavedViews, type PullRequestBrowseFilters } from "./saved-views.ts";
+import { appendPullRequestCommentPage } from "./pr-activity.logic.ts";
 import { Action, createProjectScope, destinationGuard, errorMessage, Section } from "./common.tsx";
 
 const entryKey = (entry: PullRequestListEntry) =>
   `${entry.host}\0${entry.repository}\0${entry.number}`;
+const statKey = (entry: Pick<PullRequestDiffStat, "projectId" | "repository" | "number">) =>
+  JSON.stringify([entry.projectId, entry.repository, entry.number]);
 const actionLabels: Record<PullRequestAction, string> = {
   merge: "Merge",
   ready: "Mark ready for review",
@@ -38,11 +50,12 @@ export function PullRequestsPanel(props: FeatureProps) {
   const scope = createProjectScope(props);
   const environment = createMemo(() => props.state()?.environmentId);
   const projectId = createMemo(() => scope.project()?.id);
-  const [filter, setFilter] = createSignal<{
-    state: "all" | "open" | "closed" | "merged";
-    involvement: "all" | "reviewing" | "authored";
-    query: string;
-  }>({ state: "open", involvement: "all", query: "" });
+  const [filter, setFilter] = createSignal<PullRequestBrowseFilters>({
+    state: "open",
+    involvement: "all",
+    query: "",
+    sort: "updated",
+  });
   const [revision, setRevision] = createSignal(0);
   const [result, setResult] = createSignal<PullRequestListResult | null>(null);
   const [failure, setFailure] = createSignal<string | null>(null);
@@ -54,7 +67,56 @@ export function PullRequestsPanel(props: FeatureProps) {
   const [activity, setActivity] = createSignal<PullRequestActivity | null>(null);
   const [detailFailure, setDetailFailure] = createSignal<string | null>(null);
   const [accountId, setAccountId] = createSignal<string | undefined>();
-  const entries = () => result()?.entries ?? [];
+  const [liveFailure, setLiveFailure] = createSignal<string | null>(null);
+  const [stats, setStats] = createSignal<ReadonlyMap<string, PullRequestDiffStat>>(new Map());
+  const [statsFailure, setStatsFailure] = createSignal<string | null>(null);
+  let statsAttempted = new Set<string>();
+  const connected = createMemo(() => props.state()?.connection === "connected");
+  const needsCounts = createMemo(() => ["ready", "largest", "smallest"].includes(filter().sort));
+  const listFilters = createMemo(
+    () => {
+      const value = filter();
+      return { state: value.state, involvement: value.involvement, query: value.query };
+    },
+    undefined,
+    {
+      equals: (left, right) =>
+        left.state === right.state &&
+        left.involvement === right.involvement &&
+        left.query === right.query,
+    },
+  );
+  const entries = createMemo(() => {
+    const value = filter();
+    const rows = (result()?.entries ?? []).map((entry) => {
+      const measured = stats().get(statKey(entry));
+      return measured
+        ? { ...entry, additions: measured.additions, deletions: measured.deletions }
+        : entry;
+    });
+    const groups: PullRequestGroup<PullRequestListEntry>[] = [];
+    if (value.involvement === "all" && (value.sort === "ready" || value.sort === "blocked")) {
+      const authored = rows.filter((entry) => {
+        const viewer = result()?.viewers[entry.host];
+        return viewer && entry.author?.login.toLowerCase() === viewer.toLowerCase();
+      });
+      const held = new Set(authored);
+      const reviewing = rows.filter((entry) => !held.has(entry) && entry.viewerReviewRequested);
+      for (const entry of reviewing) held.add(entry);
+      groups.push(
+        { key: "authored", label: "Authored", entries: authored },
+        { key: "reviewRequested", label: "Review requested", entries: reviewing },
+        { key: "others", label: "Others", entries: rows.filter((entry) => !held.has(entry)) },
+      );
+    } else groups.push({ key: "others", label: "Pull requests", entries: rows });
+    return sortPullRequestGroups(
+      groups,
+      value.sort,
+      value.query,
+      (entry) => entry.additions + entry.deletions > 0 || stats().has(statKey(entry)),
+      value.involvement,
+    ).flatMap((group) => group.entries);
+  });
   const selected = createMemo(
     () => entries().find((entry) => entryKey(entry) === selection()) ?? entries()[0],
   );
@@ -62,13 +124,34 @@ export function PullRequestsPanel(props: FeatureProps) {
 
   createEffect(() => {
     const environmentId = environment();
+    setLiveFailure(null);
+    if (!environmentId || !connected()) return;
+    let last: number | undefined;
+    const stop = subscribe(
+      props.client,
+      WS_METHODS.pullRequestsSubscribeRefreshes,
+      {},
+      (value) => {
+        if (last !== undefined && value !== last) refresh();
+        last = value;
+      },
+      (error) => setLiveFailure(errorMessage(error)),
+    );
+    onCleanup(stop);
+  });
+
+  createEffect(() => {
+    const environmentId = environment();
     const id = projectId();
-    const filters = filter();
+    const filters = listFilters();
     revision();
     const current = ++generation;
     let active = true;
     setReview(null);
     setResult(null);
+    statsAttempted = new Set();
+    setStats(new Map());
+    setStatsFailure(null);
     setFailure(null);
     setLoading(true);
     if (!environmentId || !id) {
@@ -95,6 +178,51 @@ export function PullRequestsPanel(props: FeatureProps) {
       });
     onCleanup(() => {
       active = false;
+    });
+  });
+
+  createEffect(() => {
+    const environmentId = environment();
+    const rows = result()?.entries ?? [];
+    if (!environmentId || !connected() || !needsCounts() || !rows.length) return;
+    const current = generation;
+    const measured = untrack(stats);
+    const missing = rows.filter(
+      (entry) =>
+        entry.additions + entry.deletions === 0 &&
+        !measured.has(statKey(entry)) &&
+        !statsAttempted.has(statKey(entry)),
+    );
+    if (!missing.length) return;
+    for (const entry of missing) statsAttempted.add(statKey(entry));
+    let active = true;
+    let finished = false;
+    void (async () => {
+      for (let offset = 0; offset < missing.length; offset += 500) {
+        const value = await request(props.client, WS_METHODS.pullRequestsListStats, {
+          refs: missing.slice(offset, offset + 500).map((entry) => ({
+            projectId: entry.projectId,
+            host: entry.host,
+            repository: entry.repository,
+            number: entry.number,
+          })),
+        });
+        if (!active || current !== generation) return;
+        setStats((previous) => {
+          const next = new Map(previous);
+          for (const stat of value.stats) next.set(statKey(stat), stat);
+          return next;
+        });
+      }
+      finished = true;
+    })().catch((error) => {
+      finished = true;
+      if (active && current === generation) setStatsFailure(errorMessage(error));
+    });
+    onCleanup(() => {
+      active = false;
+      if (!finished && current === generation)
+        for (const entry of missing) statsAttempted.delete(statKey(entry));
     });
   });
 
@@ -163,6 +291,14 @@ export function PullRequestsPanel(props: FeatureProps) {
             { label: "Authored by me", value: "authored" },
           ],
         },
+        {
+          name: "sort",
+          label: "Sort by",
+          type: "select",
+          value: initial.sort,
+          options: PullRequestListSort.literals.map((value) => ({ label: value, value })),
+          description: "Size and readiness use the host's loaded counts and status.",
+        },
       ],
       submitLabel: "Search",
       onSubmit: async (values) => {
@@ -176,9 +312,33 @@ export function PullRequestsPanel(props: FeatureProps) {
             values.involvement === "reviewing" || values.involvement === "authored"
               ? values.involvement
               : "all",
+          sort: PullRequestListSort.literals.find((sort) => sort === values.sort) ?? "updated",
         });
       },
     });
+  }
+
+  function savedViews() {
+    const environmentId = environment();
+    const id = projectId();
+    if (!environmentId || !id) return;
+    void props.ui.run(() =>
+      showSavedViews(
+        props,
+        {
+          kind: "pull-requests",
+          environmentId,
+          projectId: id,
+          filters: filter(),
+        },
+        (view) => {
+          if (view.kind !== "pull-requests") return;
+          scope.select(view.projectId);
+          setFilter(view.filters);
+          setSelection("");
+        },
+      ),
+    );
   }
 
   function loadMore() {
@@ -221,7 +381,14 @@ export function PullRequestsPanel(props: FeatureProps) {
       value.projectId !== entry.projectId
     )
       return;
-    const guard = destinationGuard(props);
+    const checkEnvironment = destinationGuard(props);
+    const targetKey = entryKey(entry);
+    const guard = () => {
+      checkEnvironment();
+      const current = selected();
+      if (!current || entryKey(current) !== targetKey)
+        throw new Error("The selected pull request changed. Open its actions again.");
+    };
     const ref: PullRequestRef = {
       projectId: value.projectId,
       repository: value.repository,
@@ -235,7 +402,38 @@ export function PullRequestsPanel(props: FeatureProps) {
       guard();
       refresh();
     }
-    const options: Choice[] = [];
+    const options: Choice[] = pullRequestThreadLinkChoice(props, {
+      host: entry.host,
+      repository: value.repository,
+      number: value.number,
+      url: value.url,
+    });
+    if (activity()?.commits.length)
+      options.push({
+        title: "Commits",
+        run: () =>
+          props.ui.choose(
+            "Pull request commits",
+            activity()!.commits.map((commit) => ({
+              title: `${commit.oid.slice(0, 8)} ${commit.messageHeadline}`,
+              description: `${commit.committedDate}${commit.authors?.length ? ` · ${commit.authors.map((author) => author.login).join(", ")}` : ""}`,
+              run: () =>
+                props.ui.text(
+                  commit.messageHeadline || commit.oid,
+                  [
+                    commit.oid,
+                    commit.committedDate,
+                    commit.authors?.map((author) => author.login).join(", "),
+                    commit.additions !== undefined && commit.deletions !== undefined
+                      ? `+${commit.additions} −${commit.deletions}`
+                      : "",
+                  ]
+                    .filter(Boolean)
+                    .join("\n"),
+                ),
+            })),
+          ),
+      });
     if (value.capabilities.reactions)
       options.push({
         title: "React to pull request",
@@ -598,75 +796,116 @@ export function PullRequestsPanel(props: FeatureProps) {
             );
           }),
       });
-    if (activity()?.reviewThreads.length)
+    const openConversation = (threadId: string) => {
+      guard();
+      const current = activity();
+      const thread =
+        current && pullRequestConversationThreads(current).find((thread) => thread.id === threadId);
+      if (!thread)
+        throw new Error("This review conversation is no longer loaded. Refresh the pull request.");
+      const label =
+        thread.path === null ? "Overview conversation" : `${thread.path}:${thread.line ?? ""}`;
+      props.ui.choose(`${label} · ${thread.comments.length} loaded`, [
+        {
+          title: "Read conversation",
+          run: () =>
+            props.ui.text(
+              label,
+              thread.comments
+                .map(
+                  (comment) =>
+                    `${comment.author?.login ?? "Unknown"} · ${comment.createdAt}\n${comment.body}`,
+                )
+                .join("\n\n"),
+              "markdown",
+            ),
+        },
+        ...(thread.nextCommentsCursor
+          ? [
+              {
+                title: "Load more comments…",
+                run: () =>
+                  void props.ui.run(async () => {
+                    guard();
+                    const cursor = thread.nextCommentsCursor!;
+                    const page = await request(
+                      props.client,
+                      WS_METHODS.pullRequestsThreadComments,
+                      {
+                        ...ref,
+                        threadId: thread.id,
+                        cursor,
+                      },
+                    );
+                    guard();
+                    setActivity((previous) =>
+                      previous
+                        ? appendPullRequestCommentPage(previous, thread.id, cursor, page)
+                        : previous,
+                    );
+                    if (page.hiddenCount)
+                      props.ui.notify(`${page.hiddenCount} comments were hidden by the host.`);
+                    openConversation(thread.id);
+                  }),
+              },
+            ]
+          : []),
+        ...(value.capabilities.review.reply && value.viewerPermissions.comment
+          ? [
+              {
+                title: "Reply",
+                run: () =>
+                  props.ui.form({
+                    title: "Reply to review",
+                    fields: [{ name: "body", label: "Reply", type: "multiline", required: true }],
+                    submitLabel: "Post reply",
+                    onSubmit: async (values) => {
+                      await mutate(() =>
+                        request(props.client, WS_METHODS.pullRequestsReplyToThread, {
+                          ...ref,
+                          threadId: thread.id,
+                          body: values.body ?? "",
+                        }),
+                      );
+                    },
+                  }),
+              },
+            ]
+          : []),
+        ...(value.capabilities.review.resolve &&
+        value.viewerPermissions.resolve &&
+        thread.canResolve !== false
+          ? [
+              {
+                title: thread.isResolved ? "Reopen conversation" : "Resolve conversation",
+                run: () =>
+                  void props.ui.run(
+                    () =>
+                      mutate(() =>
+                        request(props.client, WS_METHODS.pullRequestsSetThreadResolution, {
+                          ...ref,
+                          threadId: thread.id,
+                          resolved: !thread.isResolved,
+                        }),
+                      ),
+                    "Conversation updated.",
+                  ),
+              },
+            ]
+          : []),
+      ]);
+    };
+    const conversations = activity() ? pullRequestConversationThreads(activity()!) : [];
+    if (conversations.length)
       options.push({
         title: "Review conversations",
         run: () =>
           props.ui.choose(
             "Review conversations",
-            activity()!.reviewThreads.map((thread) => ({
-              title: `${thread.isResolved ? "✓ " : ""}${thread.path}:${thread.line ?? ""}`,
+            conversations.map((thread) => ({
+              title: `${thread.isResolved ? "✓ " : ""}${thread.path === null ? "Overview" : `${thread.path}:${thread.line ?? ""}`}`,
               description: thread.comments[0]?.body,
-              run: () =>
-                props.ui.choose("Conversation", [
-                  {
-                    title: "Read conversation",
-                    run: () =>
-                      props.ui.text(
-                        `${thread.path}:${thread.line ?? ""}`,
-                        thread.comments
-                          .map(
-                            (comment) => `${comment.author?.login ?? "Unknown"}\n${comment.body}`,
-                          )
-                          .join("\n\n"),
-                      ),
-                  },
-                  ...(value.capabilities.review.reply && value.viewerPermissions.comment
-                    ? [
-                        {
-                          title: "Reply",
-                          run: () =>
-                            props.ui.form({
-                              title: "Reply to review",
-                              fields: [
-                                { name: "body", label: "Reply", type: "multiline", required: true },
-                              ],
-                              submitLabel: "Post reply",
-                              onSubmit: async (values) => {
-                                await mutate(() =>
-                                  request(props.client, WS_METHODS.pullRequestsReplyToThread, {
-                                    ...ref,
-                                    threadId: thread.id,
-                                    body: values.body ?? "",
-                                  }),
-                                );
-                              },
-                            }),
-                        },
-                      ]
-                    : []),
-                  ...(value.capabilities.review.resolve &&
-                  value.viewerPermissions.resolve &&
-                  thread.canResolve !== false
-                    ? [
-                        {
-                          title: thread.isResolved ? "Reopen conversation" : "Resolve conversation",
-                          run: () =>
-                            void props.ui.run(
-                              () =>
-                                mutate(() =>
-                                  request(
-                                    props.client,
-                                    WS_METHODS.pullRequestsSetThreadResolution,
-                                    { ...ref, threadId: thread.id, resolved: !thread.isResolved },
-                                  ),
-                                ),
-                              "Conversation updated.",
-                            ),
-                        },
-                      ]
-                    : []),
-                ]),
+              run: () => openConversation(thread.id),
             })),
           ),
       });
@@ -781,6 +1020,7 @@ export function PullRequestsPanel(props: FeatureProps) {
     if (event.name === "/" || event.name === "f") search();
     else if (event.name === "p") scope.choose();
     else if (event.name === "r") refresh();
+    else if (event.name === "v") savedViews();
     else if (event.name === "m") loadMore();
     else if (event.name === "a") actions();
     else if (event.name === "right") setPane("detail");
@@ -807,7 +1047,13 @@ export function PullRequestsPanel(props: FeatureProps) {
       </Show>
       <Show when={!review()}>
         <box flexGrow={1} flexDirection="column" minHeight={0} onMouseDown={props.onFocus}>
-          <box flexDirection="row" padding={1} justifyContent="space-between" gap={2}>
+          <box
+            flexDirection="row"
+            flexWrap="wrap"
+            padding={1}
+            justifyContent="space-between"
+            gap={2}
+          >
             <text fg={theme.text} attributes={1}>
               Pull requests
             </text>
@@ -816,27 +1062,38 @@ export function PullRequestsPanel(props: FeatureProps) {
               onPress={scope.choose}
             />
             <Action label="Search [/]" onPress={search} />
+            <Action label="Saved views [v]" onPress={savedViews} />
           </box>
-          <text fg={theme.textMuted} paddingX={1}>
-            {filter().state} · {filter().involvement}
+          <text height={1} flexShrink={0} truncate fg={theme.textMuted} paddingX={1}>
+            {filter().state} · {filter().involvement} · {filter().sort}
             {filter().query ? ` · ${filter().query}` : ""}
             {loading() ? " · Loading…" : ""}
           </text>
+          <Show when={liveFailure()}>
+            <text flexShrink={0} fg={theme.warning} paddingX={1} wrapMode="word">
+              Live refresh unavailable: {liveFailure()} · Refresh manually with r.
+            </text>
+          </Show>
+          <Show when={statsFailure()}>
+            <text flexShrink={0} fg={theme.warning} paddingX={1} wrapMode="word">
+              Some line counts are unavailable: {statsFailure()} · r retries.
+            </text>
+          </Show>
           <Show when={failure()}>
-            <text fg={theme.error} paddingX={1} wrapMode="word">
+            <text flexShrink={0} fg={theme.error} paddingX={1} wrapMode="word">
               {failure()}
             </text>
           </Show>
           <For each={result()?.errors}>
             {(error) => (
-              <text fg={theme.warning} paddingX={1} wrapMode="word">
+              <text flexShrink={0} fg={theme.warning} paddingX={1} wrapMode="word">
                 {error.projectTitle}: {error.message}
               </text>
             )}
           </For>
           <For each={result()?.providers.filter((provider) => !provider.configured)}>
             {(provider) => (
-              <text fg={theme.warning} paddingX={1} wrapMode="word">
+              <text flexShrink={0} fg={theme.warning} paddingX={1} wrapMode="word">
                 {provider.host}: {provider.detail ?? "Source control account is not configured."}
               </text>
             )}
@@ -953,6 +1210,17 @@ export function PullRequestsPanel(props: FeatureProps) {
                           </text>
                         </Section>
                       </Show>
+                      <Show when={activity()?.commits.length}>
+                        <Section title="Commits">
+                          <For each={activity()?.commits}>
+                            {(commit) => (
+                              <text fg={theme.textMuted} wrapMode="word">
+                                {commit.oid.slice(0, 8)} {commit.messageHeadline}
+                              </text>
+                            )}
+                          </For>
+                        </Section>
+                      </Show>
                       <For each={activity()?.comments}>
                         {(comment) => (
                           <Section
@@ -982,7 +1250,8 @@ export function PullRequestsPanel(props: FeatureProps) {
             </box>
           </Show>
           <text fg={theme.textMuted} paddingX={1}>
-            ↑↓ select · → details · ← list · enter actions · / search · p project · r refresh
+            ↑↓ select · → details · ← list · enter actions · / search · v views · p project · r
+            refresh
           </text>
         </box>
       </Show>

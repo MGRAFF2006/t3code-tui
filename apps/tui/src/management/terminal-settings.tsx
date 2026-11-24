@@ -8,6 +8,7 @@ import type { FeatureProps } from "../ui/controller.ts";
 import { theme, themeMode } from "../theme/index.ts";
 import { Action, Section } from "./common.tsx";
 import { iconPreview, resolvedIconMode } from "../presentation/icons.ts";
+import { configureThreadDetails } from "../features/thread-details.tsx";
 
 export function createTerminalSettings(props: FeatureProps) {
   const [preferences, setPreferences] = createSignal(props.client.preferences());
@@ -143,6 +144,11 @@ export function createTerminalSettings(props: FeatureProps) {
       title: "Reset panel widths",
       description: "Restore the default left width and automatic right width.",
       run: () => resetPanelWidths(props),
+    },
+    {
+      title: "Thread detail rows",
+      description: "Choose the rows shown in the native Details panel, or restore their defaults.",
+      run: () => configureThreadDetails(props),
     },
     {
       title: "Reset terminal preferences",

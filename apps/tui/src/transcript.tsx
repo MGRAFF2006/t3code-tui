@@ -9,6 +9,7 @@ import {
   CodeRenderable,
   TextBufferRenderable,
   type MarkdownRenderable,
+  type TextRenderable,
   type Renderable,
   type SyntaxStyle,
   type MouseEvent,
@@ -33,6 +34,8 @@ import {
 } from "solid-js";
 
 import { theme } from "./theme/index.ts";
+import { searchableMessageSegments, searchablePlanSegments } from "@t3tools/shared/threadFindText";
+import { ConversationFindText } from "./conversation/find-text.tsx";
 import { createSyntax } from "./theme/syntax.ts";
 import { replaceComposerContextReferences } from "@t3tools/shared/composerContextReferences";
 import {
@@ -244,6 +247,10 @@ function Item(props: {
   expanded: boolean;
   onToggle: () => void;
   highlighted?: boolean | undefined;
+  findQuery?: string | undefined;
+  highlightedOccurrence?: number | undefined;
+  onFindMatch?: ((node: TextRenderable, offset: number) => void) | undefined;
+  onEditPrompt?: (() => void) | undefined;
   timestampFormat?: TimestampFormat | undefined;
   onOpenLinks?: (() => void) | undefined;
   cwd?: string | undefined;
@@ -358,6 +365,21 @@ function Item(props: {
       ? `$ ${value.input}\n${live.output.truncated ? "Earlier output not shown\n" : ""}${Bun.stripANSI(live.output.text)}`
       : turnItemText(value, true);
   });
+  const findSegments = createMemo(() => {
+    if (!props.findQuery) return null;
+    const value = item();
+    if (value.type === "proposed_plan") return searchablePlanSegments(value.markdown, props.cwd);
+    if (value.type !== "user_message" && value.type !== "assistant_message") return null;
+    return searchableMessageSegments(
+      {
+        role: value.type === "user_message" ? "user" : "assistant",
+        text: value.text,
+        streaming: value.type === "assistant_message" && value.streaming,
+        context: value.type === "user_message" ? value.context : undefined,
+      },
+      props.cwd,
+    );
+  });
   const label = () => {
     const value = item();
     if (value.type === "user_message") return "You";
@@ -445,6 +467,19 @@ function Item(props: {
             Details{" "}
           </text>
         </Show>
+        <Show
+          when={props.onEditPrompt && item().type === "user_message" && visibility() === "local"}
+        >
+          <text
+            selectable={false}
+            flexShrink={0}
+            fg={theme.textMuted}
+            onMouseDown={() => props.onEditPrompt?.()}
+          >
+            {" "}
+            Edit{" "}
+          </text>
+        </Show>
         <Show when={props.onCopy && (isMessage() || showBody())}>
           <text
             selectable={false}
@@ -489,40 +524,55 @@ function Item(props: {
           <RowTimestamp item={item()} format={props.timestampFormat} />
         </Show>
       </box>
-      <Show when={showBody() && content()}>
+      <Show when={showBody() && (content() || findSegments()?.length)}>
         <Show
-          when={item().type === "assistant_message" || item().type === "proposed_plan"}
+          when={findSegments()}
           fallback={
             <Show
-              when={patch()}
+              when={item().type === "assistant_message" || item().type === "proposed_plan"}
               fallback={
-                <text
-                  fg={item().type === "reasoning" ? theme.textMuted : theme.text}
-                  wrapMode={props.wordWrap === false ? "none" : "word"}
+                <Show
+                  when={patch()}
+                  fallback={
+                    <text
+                      fg={item().type === "reasoning" ? theme.textMuted : theme.text}
+                      wrapMode={props.wordWrap === false ? "none" : "word"}
+                    >
+                      {content()}
+                    </text>
+                  }
                 >
-                  {content()}
-                </text>
+                  {(value) => (
+                    <diff
+                      diff={value()}
+                      view="unified"
+                      syntaxStyle={props.syntax}
+                      fg={theme.text}
+                      showLineNumbers
+                      wrapMode={props.wordWrap === false ? "none" : "word"}
+                    />
+                  )}
+                </Show>
               }
             >
-              {(value) => (
-                <diff
-                  diff={value()}
-                  view="unified"
-                  syntaxStyle={props.syntax}
-                  fg={theme.text}
-                  showLineNumbers
-                  wrapMode={props.wordWrap === false ? "none" : "word"}
-                />
-              )}
+              <MarkdownMessage
+                wordWrap={props.wordWrap}
+                syntax={props.syntax}
+                content={content()}
+                streaming={Boolean(streaming())}
+              />
             </Show>
           }
         >
-          <MarkdownMessage
-            wordWrap={props.wordWrap}
-            syntax={props.syntax}
-            content={content()}
-            streaming={Boolean(streaming())}
-          />
+          {(segments) => (
+            <ConversationFindText
+              segments={segments()}
+              query={props.findQuery!}
+              activeOccurrence={props.highlighted ? props.highlightedOccurrence : undefined}
+              onActiveMatch={props.onFindMatch}
+              wordWrap={props.wordWrap}
+            />
+          )}
         </Show>
       </Show>
       <Show when={showBody() && outputError()}>
@@ -749,6 +799,7 @@ function WorkGroup(props: {
 export function Transcript(props: {
   projection: OrchestrationV2ThreadProjection;
   onOpenItem?: (item: OrchestrationV2ProjectedTurnItem) => void;
+  onEditPrompt?: ((item: OrchestrationV2ProjectedTurnItem) => void) | undefined;
   onCopyItem?: (item: OrchestrationV2ProjectedTurnItem) => void;
   onOpenThread?: (id: string) => void;
   onOpenFile?: (path: string) => void;
@@ -767,6 +818,9 @@ export function Transcript(props: {
   onSecretRequest?: ((item: SecretRequestItem) => void) | undefined;
   onLoadWork?: ((entry: OrchestrationV2ProjectedTurnItem) => Promise<void>) | undefined;
   highlightedEntryId?: string | undefined;
+  findQuery?: string | undefined;
+  highlightedOccurrence?: number | undefined;
+  onFindMatch?: ((node: TextRenderable, offset: number) => void) | undefined;
   onCommandOutput?:
     | ((
         entry: OrchestrationV2ProjectedTurnItem,
@@ -832,9 +886,28 @@ export function Transcript(props: {
               <text fg={message.role === "user" ? theme.primary : theme.textMuted}>
                 {message.role === "user" ? "You" : "Agent"}
               </text>
-              <text fg={theme.text} wrapMode={props.wordWrap === false ? "none" : "word"}>
-                {message.text}
-              </text>
+              <Show
+                when={props.findQuery}
+                fallback={
+                  <text fg={theme.text} wrapMode={props.wordWrap === false ? "none" : "word"}>
+                    {message.text}
+                  </text>
+                }
+              >
+                {(query) => (
+                  <ConversationFindText
+                    segments={searchableMessageSegments(message, props.cwd) ?? [message.text]}
+                    query={query()}
+                    activeOccurrence={
+                      message.id === props.highlightedEntryId
+                        ? props.highlightedOccurrence
+                        : undefined
+                    }
+                    onActiveMatch={props.onFindMatch}
+                    wordWrap={props.wordWrap}
+                  />
+                )}
+              </Show>
             </box>
           )}
         </For>
@@ -862,6 +935,7 @@ export function Transcript(props: {
               wordWrap={props.wordWrap}
               timestampFormat={props.timestampFormat}
               onOpen={() => props.onOpenItem?.(entry())}
+              onEditPrompt={props.onEditPrompt ? () => props.onEditPrompt?.(entry()) : undefined}
               onOpenFile={props.onOpenFile}
               onFocus={props.onFocus}
               expandAll={props.expandAll}
@@ -884,6 +958,9 @@ export function Transcript(props: {
                   });
               }}
               highlighted={transcriptEntryMatches(entry(), props.highlightedEntryId)}
+              findQuery={props.findQuery}
+              highlightedOccurrence={props.highlightedOccurrence}
+              onFindMatch={props.onFindMatch}
               cwd={props.cwd}
               onOpenLinks={props.onOpenLinks ? () => props.onOpenLinks!(entry()) : undefined}
               subscribeOutput={

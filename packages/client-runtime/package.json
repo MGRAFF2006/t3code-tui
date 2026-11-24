@@ -3,6 +3,14 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./pull-request-list-preferences": {
+      "types": "./src/pullRequestListPreferences.ts",
+      "default": "./src/pullRequestListPreferences.ts"
+    },
+    "./pull-request-list-sort": {
+      "types": "./src/pullRequestListSort.ts",
+      "default": "./src/pullRequestListSort.ts"
+    },
     "./pull-request-diff-fold": {
       "types": "./src/pullRequestDiffFold.ts",
       "default": "./src/pullRequestDiffFold.ts"

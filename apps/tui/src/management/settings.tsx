@@ -21,6 +21,7 @@ import * as Schema from "effect/Schema";
 import type { Choice, FeatureProps, Field } from "../ui/controller.ts";
 import { request, subscribe } from "../rpc/request.ts";
 import { theme } from "../theme/index.ts";
+import { connectionDiagnosticsActions } from "./connection-diagnostics.ts";
 import { createTerminalSettings } from "./terminal-settings.tsx";
 import { createSettingsExtras, type ExtraSettingsSection } from "./settings-extras.tsx";
 import { Action, destinationGuard, Section } from "./common.tsx";
@@ -932,6 +933,11 @@ export function SettingsPanel(
     const value = settings();
     if (active === "connections")
       return [
+        {
+          title: "Connection diagnostics",
+          description: "Saved routes, connection failures and protocol recovery.",
+          run: () => void props.ui.run(() => connectionDiagnosticsActions(props)),
+        },
         {
           title: "Current environment",
           value: props.state()?.label ?? "Disconnected",

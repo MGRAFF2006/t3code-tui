@@ -33,6 +33,7 @@ import {
   sortActiveThreadsByOrderKey,
   sortPinnedThreadsByOrderKey,
 } from "@t3tools/client-runtime/state/thread-sort";
+import { newThreadLaunch } from "./projects/launch.ts";
 import { newProjectActions } from "./projects/new-project.ts";
 import { importAgentHistory } from "./features/history.ts";
 import { threadRelationships } from "./features/relationships.ts";
@@ -44,7 +45,12 @@ import { theme } from "./theme/index.ts";
 import { createTerminalAppearance } from "./theme/appearance.ts";
 import { chooseTerminalAppearance } from "./ui/appearance.ts";
 import { chooseToolVisibility } from "./ui/tool-visibility.ts";
-import type { TuiPreferences } from "./runtime/preferences.ts";
+import {
+  threadLayoutKey,
+  type TuiPreferences,
+  type TuiThreadLayout,
+} from "./runtime/preferences.ts";
+import { createNavigationHistory } from "./presentation/navigation-history.ts";
 import { icon, setIconMode, type IconMode, type IconName } from "./presentation/icons.ts";
 import { selectableModels } from "./presentation/models.ts";
 import { threadStatus, threadStatusPresentation } from "./presentation/thread-status.ts";
@@ -80,6 +86,9 @@ import { guestShareActions } from "./management/guest-share.ts";
 import { providerFeedbackActions } from "./management/feedback.ts";
 import { AdvancedPanel } from "./features/advanced.tsx";
 import { openTerminal } from "./terminal/session.ts";
+import { configureThreadDetails } from "./features/thread-details.tsx";
+import { threadLinkChoices } from "./features/thread-links.ts";
+import { connectionDiagnosticsActions } from "./management/connection-diagnostics.ts";
 
 type Modal =
   | {
@@ -199,6 +208,74 @@ export function App(props: { client: TuiClient | null; demo?: boolean; onExit: (
   });
   const shell = createMemo(() => state()?.shell);
   const environment = createMemo(() => state()?.environmentId);
+  const navigationHistory = createNavigationHistory();
+  const [historyRevision, setHistoryRevision] = createSignal(0);
+  let navigatingHistory = false;
+  let navigationRequest = 0;
+  // Synchronize native navigation with its local Back/Forward history.
+  createEffect(() => {
+    const environmentId = environment();
+    const threadId = state()?.selectedThreadId ?? null;
+    const currentArea = area();
+    if (!environmentId || navigatingHistory) return;
+    if (navigationHistory.record({ environmentId, threadId, area: currentArea }))
+      setHistoryRevision((value) => value + 1);
+  });
+  const historyTarget = (direction: "back" | "forward") => {
+    historyRevision();
+    return navigationHistory.target(direction);
+  };
+  let layoutScope: string | null = null;
+  let layoutWrite: string | undefined;
+  // Persist and restore each environment/thread's workspace presentation on this terminal.
+  createEffect(() => {
+    const environmentId = environment();
+    const threadId = state()?.selectedThreadId;
+    const nextScope = environmentId && threadId ? threadLayoutKey(environmentId, threadId) : null;
+    const currentArea = area();
+    const layout: TuiThreadLayout = {
+      workspaceOpen: workspace(),
+      tab: workspaceTab(),
+      maximized: currentArea === "workspace",
+      openPath: openPath() ?? null,
+      openLine: openLine(),
+    };
+    if (!props.client) return;
+    const saved = nextScope ? props.client.preferences().threadLayouts[nextScope] : undefined;
+    if (nextScope !== layoutScope) {
+      layoutScope = nextScope;
+      batch(() => {
+        setWorkspace(saved?.workspaceOpen ?? false);
+        setWorkspaceTab(saved?.tab ?? "changes");
+        setOpenPath(saved?.openPath ?? undefined);
+        setOpenLine(saved?.openLine ?? 1);
+        if (currentArea === "chat" || currentArea === "workspace")
+          setArea(saved?.maximized ? "workspace" : "chat");
+      });
+      return;
+    }
+    if (!nextScope) return;
+    const next = {
+      ...layout,
+      maximized:
+        currentArea === "chat" || currentArea === "workspace"
+          ? layout.maximized
+          : (saved?.maximized ?? false),
+    };
+    const encoded = JSON.stringify(next);
+    const write = `${nextScope}/${encoded}`;
+    if (JSON.stringify(saved) !== encoded && layoutWrite !== write) {
+      layoutWrite = write;
+      void run(async () => {
+        try {
+          await props.client!.updateThreadLayout(nextScope, next);
+        } catch (error) {
+          if (layoutWrite === write) layoutWrite = undefined;
+          throw error;
+        }
+      });
+    }
+  });
   const terminalActivity = createTerminalActivity(state);
   const allThreads = createMemo(() => [
     ...new Map(
@@ -416,6 +493,7 @@ export function App(props: { client: TuiClient | null; demo?: boolean; onExit: (
     });
   }
   function openThread(id: string, target?: ThreadSearchTarget) {
+    navigationRequest += 1;
     if (id === state()?.selectedThreadId && area() === "chat") {
       setSearchTarget(target);
       setFocus("main");
@@ -431,7 +509,47 @@ export function App(props: { client: TuiClient | null; demo?: boolean; onExit: (
       setFocus("main");
     });
   }
+  function navigateHistory(direction: "back" | "forward") {
+    const target = historyTarget(direction);
+    if (!target || navigatingHistory) return;
+    const check = scope();
+    const generation = ++navigationRequest;
+    void run(async () => {
+      if (!(await beforeNavigate()) || generation !== navigationRequest) return;
+      check();
+      navigatingHistory = true;
+      try {
+        if (environment() !== target.entry.environmentId)
+          await client().selectEnvironment(target.entry.environmentId);
+        if (generation !== navigationRequest) return;
+        if (environment() !== target.entry.environmentId)
+          throw new Error(
+            "The destination environment is unavailable. Reconnect before navigating.",
+          );
+        client().selectThread(target.entry.threadId);
+        batch(() => {
+          setArea(target.entry.area);
+          setFocus("main");
+          setSearchTarget(undefined);
+          navigationHistory.visit(target);
+          setHistoryRevision((value) => value + 1);
+        });
+      } finally {
+        navigatingHistory = false;
+        const environmentId = environment();
+        if (environmentId) {
+          navigationHistory.record({
+            environmentId,
+            threadId: state()?.selectedThreadId ?? null,
+            area: area(),
+          });
+          setHistoryRevision((value) => value + 1);
+        }
+      }
+    });
+  }
   function openArea(next: Area) {
+    navigationRequest += 1;
     if (next === area()) {
       setSettingsProviderTarget(undefined);
       setFocus("main");
@@ -484,18 +602,24 @@ export function App(props: { client: TuiClient | null; demo?: boolean; onExit: (
       advanced: "terminal",
       browser: "browser",
     };
-    choose(
-      "Switch view",
-      destinations.map((item) => ({
+    choose("Switch view", [
+      ...(historyTarget("back")
+        ? [{ title: "Go back", description: "Alt+[", run: () => navigateHistory("back") }]
+        : []),
+      ...(historyTarget("forward")
+        ? [{ title: "Go forward", description: "Alt+]", run: () => navigateHistory("forward") }]
+        : []),
+      ...destinations.map((item) => ({
         title: `${icon(icons[item.area])} ${item.title}`.trim(),
         description: `Alt+${item.shortcut}${area() === item.area ? " · Current view" : ""}`,
         run: () => openArea(item.area),
       })),
-    );
+    ]);
   }
   function headerActions() {
     choose("Thread and workspace", [
       { title: "Thread actions…", run: () => threadActions() },
+      { title: "Thread details", run: showThreadDetails },
       { title: "Review changes", run: showChanges },
       {
         title: "Open Git and branches",
@@ -507,6 +631,23 @@ export function App(props: { client: TuiClient | null; demo?: boolean; onExit: (
       { title: "New thread…", run: () => newThread() },
       { title: "Project actions…", run: currentProjectActions },
     ]);
+  }
+  function showThreadDetails() {
+    const check = scope();
+    const request = ++navigationRequest;
+    void run(async () => {
+      if (!(await beforeNavigate()) || request !== navigationRequest) return;
+      check();
+      setWorkspaceTab("details");
+      if (dimensions().width >= 132) {
+        setArea("chat");
+        setWorkspace(true);
+        setFocus("workspace");
+      } else {
+        setArea("workspace");
+        setFocus("main");
+      }
+    });
   }
   function toggleWorkspace() {
     if (dimensions().width < 132) {
@@ -619,7 +760,10 @@ export function App(props: { client: TuiClient | null; demo?: boolean; onExit: (
           category: entry.environmentId === state()?.environmentId ? "Connected" : "",
           run: () =>
             void run(async () => {
-              if (await beforeNavigate()) await client().selectEnvironment(entry.environmentId);
+              if (await beforeNavigate()) {
+                navigationRequest += 1;
+                await client().selectEnvironment(entry.environmentId);
+              }
             }),
         })),
         { title: "Pair another environment…", run: pair },
@@ -643,42 +787,33 @@ export function App(props: { client: TuiClient | null; demo?: boolean; onExit: (
       })),
     );
   }
+  let launchRequest = 0;
   function newThread(projectId?: string) {
-    const check = scope();
-    if (!projectId) {
-      choose("New thread", [
-        ...(state()?.shell?.projects ?? []).map((entry) => ({
-          title: entry.title,
-          description: entry.workspaceRoot,
-          run: () => newThread(entry.id),
-        })),
-        {
-          title: "New scratch conversation",
-          description: "Start without choosing a project folder.",
-          run: scratchThread,
-        },
-        { title: "Add project…", run: newProject },
-      ]);
-      return;
-    }
-    void run(async () => {
-      if (!(await beforeNavigate())) return;
-      check();
-      const destination = state()?.environmentId;
-      const selected = state()?.selectedThreadId;
-      const origin = area();
-      const unchanged = () =>
-        state()?.environmentId === destination &&
-        state()?.selectedThreadId === selected &&
-        area() === origin;
-      const id = await client().createThread(projectId);
-      if (!unchanged() || !(await beforeNavigate()) || !unchanged()) {
-        notify("Thread created. Your current view was kept.");
-        return;
-      }
-      client().selectThread(id);
-      setArea("chat");
-      setFocus("main");
+    const requestGeneration = ++launchRequest;
+    const navigationGeneration = ++navigationRequest;
+    const originEnvironment = environment();
+    const selected = state()?.selectedThreadId;
+    const originArea = area();
+    const isCurrent = () =>
+      launchRequest === requestGeneration &&
+      navigationRequest === navigationGeneration &&
+      environment() === originEnvironment &&
+      state()?.selectedThreadId === selected &&
+      area() === originArea;
+    newThreadLaunch(feature(), {
+      ...(projectId ? { projectId } : {}),
+      isCurrent,
+      onAddProject: newProject,
+      onScratch: scratchThread,
+      onLaunched: async ({ environmentId, threadId, background }) => {
+        if (background || !isCurrent()) return;
+        if (!(await beforeNavigate()) || !isCurrent()) return;
+        if (environment() !== environmentId) await client().selectEnvironment(environmentId);
+        if (environment() !== environmentId || navigationRequest !== navigationGeneration) return;
+        client().selectThread(threadId);
+        setArea("chat");
+        setFocus("main");
+      },
     });
   }
   function scratchThread() {
@@ -734,6 +869,10 @@ export function App(props: { client: TuiClient | null; demo?: boolean; onExit: (
       });
     };
     choose(target.title, [
+      ...(id === state()?.selectedThreadId
+        ? [{ title: "Thread details", run: showThreadDetails }]
+        : []),
+      ...threadLinkChoices(feature(), target),
       {
         title: "Rename thread…",
         run: () =>
@@ -1163,6 +1302,26 @@ export function App(props: { client: TuiClient | null; demo?: boolean; onExit: (
   }
   function palette() {
     choose("Commands", [
+      ...(historyTarget("back")
+        ? [
+            {
+              title: "Go back",
+              category: "Navigation",
+              description: "Alt+[",
+              run: () => navigateHistory("back"),
+            },
+          ]
+        : []),
+      ...(historyTarget("forward")
+        ? [
+            {
+              title: "Go forward",
+              category: "Navigation",
+              description: "Alt+]",
+              run: () => navigateHistory("forward"),
+            },
+          ]
+        : []),
       { title: "New thread", category: "Threads", run: () => newThread() },
       { title: "New scratch conversation", category: "Threads", run: scratchThread },
       {
@@ -1172,6 +1331,18 @@ export function App(props: { client: TuiClient | null; demo?: boolean; onExit: (
       },
       { title: "Switch thread", category: "Threads", run: switchThread },
       { title: "Thread actions", category: "Threads", run: () => threadActions() },
+      { title: "Thread details", category: "Threads", run: showThreadDetails },
+      {
+        title: "Configure thread detail rows",
+        category: "Settings",
+        run: () => configureThreadDetails(feature()),
+      },
+      ...(shellThread()
+        ? threadLinkChoices(feature(), shellThread()!).map((choice) => ({
+            ...choice,
+            category: "Thread links",
+          }))
+        : []),
       {
         title: "Goal",
         category: "Agent",
@@ -1253,6 +1424,12 @@ export function App(props: { client: TuiClient | null; demo?: boolean; onExit: (
           run: () => openArea(item.area),
         })),
       { title: "Switch environment", category: "Connections", run: environments },
+      {
+        title: "Connection diagnostics",
+        category: "Connections",
+        description: "Inspect routes, connection failures and protocol recovery steps.",
+        run: () => void run(() => connectionDiagnosticsActions(feature())),
+      },
       { title: "Pair environment", category: "Connections", run: pair },
       {
         title: "Reconnect",
@@ -1293,7 +1470,7 @@ export function App(props: { client: TuiClient | null; demo?: boolean; onExit: (
   function shortcuts() {
     ui.text(
       "Keyboard shortcuts",
-      "Ctrl+P  Commands\nCtrl+K  Switch thread\nCtrl+N  New thread\nCtrl+B  Toggle sidebar (thread picker in narrow windows)\nCtrl+E  Toggle workspace panel\nCtrl+T  Open thread terminal (Ctrl+] returns)\nCtrl+A  Select all in the focused text box\n/requests  Focus approvals and questions\nAlt+1…7  Navigate sections\nF6  Move focus between panes\nCtrl+Q  Quit\n\nLists: arrows to select, Enter to open; mouse also works.\nForms: Tab changes field; arrows choose options; Ctrl+S or F2 saves.\nConversation shortcuts appear below the composer.\n\nAppearance: Ctrl+P → Terminal appearance (System / Light / Dark).\n\nPanel widths: drag the dividers; right-click or use Ctrl+P → Panel widths.\n\nThread colours and symbols:\nBlue ◌ Working\nPurple ? Needs input\nAmber △ Approval · ! Usage/budget limit\nPink @ Guest request\nGreen ✓ Done\nYellow ◷ Woken\nRed ! Failed · credentials/provider errors\nRed ● Terminal command running (number = terminals)\nGrey ⊙ Waiting on related/background work\nNormal text: Ready/already seen (no status icon)\nPins appear separately at the right of each row.",
+      "Ctrl+P  Commands\nCtrl+K  Switch thread\nCtrl+N  New thread\nCtrl+B  Toggle sidebar (thread picker in narrow windows)\nCtrl+E  Toggle workspace panel\nCtrl+T  Open thread terminal (Ctrl+] returns)\nCtrl+A  Select all in the focused text box\n/requests  Focus approvals and questions\nAlt+1…7  Navigate sections\nAlt+[ / Alt+]  Back / Forward\nF6  Move focus between panes\nCtrl+Q  Quit\n\nLists: arrows to select, Enter to open; mouse also works.\nForms: Tab changes field; arrows choose options; Ctrl+S or F2 saves.\nConversation shortcuts appear below the composer.\n\nAppearance: Ctrl+P → Terminal appearance (System / Light / Dark).\n\nPanel widths: drag the dividers; right-click or use Ctrl+P → Panel widths.\n\nThread colours and symbols:\nBlue ◌ Working\nPurple ? Needs input\nAmber △ Approval · ! Usage/budget limit\nPink @ Guest request\nGreen ✓ Done\nYellow ◷ Woken\nRed ! Failed · credentials/provider errors\nRed ● Terminal command running (number = terminals)\nGrey ⊙ Waiting on related/background work\nNormal text: Ready/already seen (no status icon)\nPins appear separately at the right of each row.",
     );
   }
   function matches(entry: OrchestrationV2ThreadShell) {
@@ -1366,6 +1543,8 @@ export function App(props: { client: TuiClient | null; demo?: boolean; onExit: (
         else return;
       } else return;
     } else if (event.ctrl && event.name === "p") palette();
+    else if (event.meta && event.name === "[") navigateHistory("back");
+    else if (event.meta && event.name === "]") navigateHistory("forward");
     else if (event.ctrl && event.name === "k") switchThread();
     else if (event.ctrl && event.name === "n") newThread(project()?.id);
     else if (event.ctrl && event.name === "b") toggleSidebar();
@@ -1716,6 +1895,22 @@ export function App(props: { client: TuiClient | null; demo?: boolean; onExit: (
               •••
             </text>
           </box>
+          <Show when={props.client && state()?.error && state()?.connection !== "connected"}>
+            <box height={1} flexShrink={0} flexDirection="row" gap={1} paddingX={1}>
+              <text fg={theme.error} height={1} truncate flexGrow={1} minWidth={0}>
+                {state()?.error}
+              </text>
+              <text
+                selectable={false}
+                fg={theme.primary}
+                height={1}
+                flexShrink={0}
+                onMouseDown={() => void run(() => connectionDiagnosticsActions(feature()))}
+              >
+                Recovery…
+              </text>
+            </box>
+          </Show>
           <Show
             when={props.client}
             fallback={
@@ -1783,6 +1978,7 @@ export function App(props: { client: TuiClient | null; demo?: boolean; onExit: (
                         focused={activeFocus() === "main"}
                         onFocus={() => setFocus("main")}
                         initialTab={workspaceTab()}
+                        onTabChange={setWorkspaceTab}
                         openPath={openPath()}
                         openLine={openLine()}
                       />
@@ -1876,8 +2072,10 @@ export function App(props: { client: TuiClient | null; demo?: boolean; onExit: (
                         focused={activeFocus() === "workspace"}
                         onFocus={() => setFocus("workspace")}
                         initialTab={workspaceTab()}
+                        onTabChange={setWorkspaceTab}
                         openPath={openPath()}
                         openLine={openLine()}
+                        visible={showWorkspace()}
                         compact
                       />
                     </box>
