@@ -618,6 +618,10 @@
     "./provider-instance-ids": {
       "types": "./src/providerInstanceIds.ts",
       "default": "./src/providerInstanceIds.ts"
+    },
+    "./composer-prompt-history": {
+      "types": "./src/composerPromptHistory.ts",
+      "default": "./src/composerPromptHistory.ts"
     }
   },
   "scripts": {

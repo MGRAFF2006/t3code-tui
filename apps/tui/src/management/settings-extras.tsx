@@ -489,8 +489,8 @@ export function createSettingsExtras(
     });
   }
 
-  const entries = createMemo<Choice[]>(() => {
-    if (section() === "usage")
+  function entriesForSection(active: ExtraSettingsSection | null): Choice[] {
+    if (active === "usage")
       return [
         ...usageSettingsActions(props),
         {
@@ -516,7 +516,7 @@ export function createSettingsExtras(
           },
         },
       ];
-    if (section() === "maintenance") {
+    if (active === "maintenance") {
       const guard = destinationGuard(props);
       const canUpdate = props.state()?.config?.environment.capabilities.npmReleaseLookup;
       return [
@@ -593,7 +593,7 @@ export function createSettingsExtras(
         },
       ];
     }
-    if (section() === "access") {
+    if (active === "access") {
       const guard = destinationGuard(props);
       return [
         { title: "Create pairing credential", run: createGrant },
@@ -702,9 +702,10 @@ export function createSettingsExtras(
         })),
       ];
     }
-    if (section() === "secrets") return secretSettingsActions(props);
+    if (active === "secrets") return secretSettingsActions(props);
     return [];
-  });
+  }
+  const entries = createMemo(() => entriesForSection(section()));
 
   function Details() {
     return (
@@ -898,5 +899,5 @@ export function createSettingsExtras(
       </>
     );
   }
-  return { entries, Details };
+  return { entries, entriesForSection, Details };
 }

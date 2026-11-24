@@ -28,6 +28,8 @@ For local development, start `vp run dev` separately and use the server address 
 
 The left sidebar lists threads across projects, using T3's shared pinned and active ordering. Its filter includes Working, Active, Settled, Snoozed and Archived. The header's **Views** menu switches between conversation, workspace, pull requests, issues, scheduled tasks, settings and browser. Conversation stays central; Changes, Files, Git, Browser, Terminals and Devices can open alongside it on wide terminals or fill the main pane on smaller ones. Right-click a thread for its actions. **Ctrl+P** searches commands, including project creation/settings and server conversation search.
 
+Thread actions include configured snooze presets, custom times and durations, unsnooze, wake dismissal, and **Reorder thread**. Reordering persists within the pinned or active section across projects. Dismissing a wake clears that notification without opening the conversation.
+
 Sidebar search and **Ctrl+K** use T3's desktop matching for titles, projects, branches and pull requests. Search spans the selected environment's non-archived shelves; clearing it restores the sidebar filter. Message-history matches appear under **In messages** with a snippet and open find at the matching message. Message search needs a word of at least three letters, or two for Chinese, Japanese and Korean. Press Escape to clear sidebar search.
 
 Drag either sidebar's divider to resize it. For exact widths, right-click a divider, use **Ctrl+P → Panel widths**, or open **Settings → Terminal → Panel widths**. Widths are saved for this terminal client. Smaller windows temporarily constrain them to leave room for the conversation; expanding the window restores your preferred sizes. The right panel also supports automatic sizing. **Reset panel widths** restores both defaults.
@@ -53,6 +55,12 @@ In conversation, Enter sends and **Alt+Enter** inserts a line break; enhanced ke
 Consecutive tool and reasoning activity collapses into a work group. Expand a group or individual item to read its details and live command output; **Expand work** opens all groups. Messages, requests, plans and important notices remain separate. Drafts and saved prompts persist privately on this computer. `/clear` starts fresh agent context on the next send; `/compact` compacts the current context when the provider supports it.
 
 **Ctrl+P → Tool visibility**, **Settings → Terminal → Tool visibility**, or **Ctrl+O → Tool visibility** chooses Show all, Hide successful, Hide all or Zen. Zen focuses on replies, requests and important notices. Conversation find temporarily reveals intermediate messages in Zen. The work log still lists hidden entries; choose Show all to restore them. This preference is saved locally across environments.
+
+With an empty composer, **Up/Down** at its first/last visual line recalls sent prompts and then returns to the empty draft. Editing a recalled prompt ends history navigation. Supported thread and environment references return with the text. Length feedback appears before sending an oversized prompt. Large pastes become text attachments when the environment supports files; **More → Paste next text inline**, or `/paste-inline`, keeps the next paste inline. Generated paste files remain in this client's private local data so drafts and saved prompts can reuse them; automatic cleanup is not yet available.
+
+**Ctrl+P → Goal**, `/goal`, or **More → Goal** opens goal creation, progress and lifecycle controls. The goal card shows provider-reported progress. Available actions follow the selected provider's capabilities; changing a goal preserves the composer draft.
+
+**Ctrl+P → Search settings**, or **Ctrl+F** or **/** inside Settings, searches the available native settings by name, section and description. In management lists, click to select a row, use the wheel to move, and press Enter to open it.
 
 **Ctrl+T** hands the terminal directly to T3's PTY. **Ctrl+]** returns to the interface and leaves that shell running. Project scripts use separate terminal sessions so they do not inject commands into an existing foreground process.
 

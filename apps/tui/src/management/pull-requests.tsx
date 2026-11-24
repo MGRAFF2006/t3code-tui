@@ -1,3 +1,4 @@
+import { selectOptionAtPointer, scrollSelectOptions } from "../ui/native-select.ts";
 import { scrollbarOptions } from "../ui/scroll.ts";
 import { useKeyboard } from "@opentui/solid";
 import { createEffect, createMemo, createSignal, For, onCleanup, Show } from "solid-js";
@@ -869,7 +870,11 @@ export function PullRequestsPanel(props: FeatureProps) {
                 }}
                 onSelect={actions}
                 focused={props.focused && !props.ui.modal() && pane() === "list"}
-                onMouseDown={() => setPane("list")}
+                onMouseDown={(event) => {
+                  selectOptionAtPointer(event);
+                  setPane("list");
+                }}
+                onMouseScroll={scrollSelectOptions}
                 backgroundColor={theme.background}
                 focusedBackgroundColor={theme.background}
                 textColor={theme.text}

@@ -1,7 +1,8 @@
 import { scrollbarOptions } from "../ui/scroll.ts";
 import type { Renderable, ScrollBoxRenderable, TextareaRenderable } from "@opentui/core";
+import { decodePasteBytes, stripAnsiSequences, type PasteEvent } from "@opentui/core";
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/solid";
-import { createEffect, createMemo, createSignal, For, onCleanup, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, on, onCleanup, Show } from "solid-js";
 import {
   CommandId,
   COMPOSER_CONTEXT_MAX_RECORDS,
@@ -47,6 +48,15 @@ import type { Choice, FeatureProps } from "../ui/controller.ts";
 import { request, subscribe } from "../rpc/request.ts";
 import { theme } from "../theme/index.ts";
 import { Transcript, turnItemText } from "../transcript.tsx";
+import { createConversationGoals } from "./goals.tsx";
+import { createPromptHistoryNavigation, isPromptHistoryCaretAtEdge } from "./prompt-history.ts";
+import { getComposerPromptLengthFeedback } from "./prompt-length.ts";
+import {
+  planComposerTextPaste,
+  readComposerTextSelection,
+  stagePastedTextAttachment,
+} from "./pasted-text.ts";
+import { localAttachmentProblem } from "../runtime/attachments.ts";
 import { chooseToolVisibility, toolVisibilityLabels } from "../ui/tool-visibility.ts";
 import { messageLinkActions } from "../presentation/links.ts";
 import { answerSecretRequest } from "../management/secrets.tsx";
@@ -104,10 +114,26 @@ function ThreadConversation(
     projection: () => OrchestrationV2ThreadProjection;
     searchTarget?: ThreadSearchTarget | undefined;
     onSearchTargetHandled?: (target: ThreadSearchTarget) => void;
+    goalRequestScope?: string | undefined;
+    onGoalRequestHandled?: () => void;
   },
 ) {
   const dimensions = useTerminalDimensions();
   const renderer = useRenderer();
+  const promptHistory = createPromptHistoryNavigation();
+  const goals = createConversationGoals(props);
+  const GoalCard = goals.Card;
+  createEffect(
+    on(
+      () => props.goalRequestScope,
+      (requested) => {
+        if (!requested) return;
+        if (requested === props.scope) goals.open();
+        else props.ui.notify("The conversation changed. Open its goal again.", true);
+        props.onGoalRequestHandled?.();
+      },
+    ),
+  );
   let panel: Renderable | undefined;
   const [panelWidth, setPanelWidth] = createSignal(dimensions().width);
   const measurePanel = () => {
@@ -132,7 +158,15 @@ function ThreadConversation(
   const [mentions, setMentions] = createSignal(initialDraft.mentions);
   const [context, setContext] = createSignal(initialDraft.context);
   const [attachments, setAttachments] = createSignal(initialDraft.attachments);
+  const [stagingPasteCount, setStagingPasteCount] = createSignal(0);
+  const [pasteInline, setPasteInline] = createSignal(false);
+  const reservedPasteNames = new Set<string>();
   const [freshContext, setFreshContext] = createSignal(initialDraft.freshContext);
+  const promptLength = createMemo(() => {
+    const raw = getComposerPromptLengthFeedback(draft());
+    const prepared = getComposerPromptLengthFeedback(resolveFileMentions(draft(), mentions()).text);
+    return prepared.length > raw.length ? prepared : raw;
+  });
   let lastComposerText = initialDraft.text;
   const [sending, setSending] = createSignal(pendingSends.has(props.scope));
   const [preferences, setPreferences] = createSignal(props.client.preferences());
@@ -324,6 +358,7 @@ function ThreadConversation(
     persistence.save(props.scope, value);
   };
   const setText = (value: string) => {
+    promptHistory.onEdit(value);
     lastComposerText = value;
     composer?.setText(value);
     setDraft(value);
@@ -347,6 +382,83 @@ function ThreadConversation(
     },
     settled: () => setSending(false),
   };
+  async function pasteText(event: PasteEvent) {
+    const editor = composer;
+    if (!editor || editor.isDestroyed) return;
+    const text = stripAnsiSequences(decodePasteBytes(event.bytes));
+    const value = editor.plainText;
+    const selection = readComposerTextSelection(editor);
+    const maxFileBytes =
+      props.state()?.config?.environment.capabilities.fileAttachments?.maxUploadBytes ?? null;
+    const plan = planComposerTextPaste({
+      text,
+      value,
+      selection,
+      maxFileBytes,
+      attachmentCount: attachments().length,
+      existingNames: [...attachments().map((attachment) => attachment.name), ...reservedPasteNames],
+      reservedAttachmentCount: stagingPasteCount(),
+      bypassAutoAttachment: pasteInline(),
+    });
+    setPasteInline(false);
+    if (plan.kind === "inline") return;
+    event.preventDefault();
+    if (plan.kind === "blocked") {
+      props.ui.notify(plan.message, true);
+      return;
+    }
+    if (sending()) {
+      props.ui.notify(
+        "Wait for this message to finish sending before attaching pasted text.",
+        true,
+      );
+      return;
+    }
+    const current = () =>
+      !disposed &&
+      props.state()?.connection === "connected" &&
+      props.state()?.environmentId === environmentId &&
+      props.state()?.selectedThreadId === destinationThreadId;
+    reservedPasteNames.add(plan.name);
+    setStagingPasteCount((count) => count + 1);
+    await props.ui.run(async () => {
+      let staged: Awaited<ReturnType<typeof stagePastedTextAttachment>> | undefined;
+      try {
+        if (!current() || maxFileBytes === null)
+          throw new Error("Return to the original conversation before attaching pasted text.");
+        staged = await stagePastedTextAttachment(props.client.localStateDirectory, text, {
+          name: plan.name,
+          maxFileBytes,
+        });
+        if (!current()) throw new Error("The conversation changed; pasted text was not attached.");
+        const limit =
+          props.state()?.config?.environment.capabilities.fileAttachments?.maxUploadBytes;
+        if (limit === undefined || staged.attachment.sizeBytes > limit)
+          throw new Error("This environment's file attachment limit changed. Paste again.");
+        const next = [...attachments(), staged.attachment];
+        const problem = localAttachmentProblem(next);
+        if (problem) throw new Error(problem);
+        if (
+          editor === composer &&
+          !editor.isDestroyed &&
+          editor.plainText === value &&
+          JSON.stringify(readComposerTextSelection(editor)) === JSON.stringify(selection)
+        )
+          editor.deleteSelection();
+        setAttachments(next);
+        staged.retain();
+        saveDraft();
+        props.ui.notify(`Attached ${plan.name}.`);
+      } finally {
+        try {
+          await staged?.discard();
+        } finally {
+          reservedPasteNames.delete(plan.name);
+          if (!disposed) setStagingPasteCount((count) => count - 1);
+        }
+      }
+    });
+  }
   draftOwners.set(props.scope, owner);
   void persistence.ready
     .then(() => {
@@ -1182,8 +1294,14 @@ function ThreadConversation(
     { title: "/queue", description: "Manage queued messages", run: queueActions },
     { title: "/requests", description: "Focus approvals and questions", run: activateRequests },
     { title: "/work", description: "Inspect the work log", run: workLog },
+    { title: "/goal", description: "Set, inspect or manage the provider's goal", run: goals.open },
     { title: "/find", description: "Find text in this conversation", run: findPrompt },
     { title: "/attach", description: "Attach a local image or file", run: attach },
+    {
+      title: "/paste-inline",
+      description: "Keep the next pasted text inline instead of making a file",
+      run: () => setPasteInline(true),
+    },
     {
       title: "/stash",
       description: "Save this draft aside or restore a saved prompt",
@@ -1262,6 +1380,10 @@ function ThreadConversation(
   async function send(delivery?: "queue" | "steer" | "restart") {
     const text = composer?.plainText ?? draft();
     if ((!text.trim() && attachments().length === 0) || sending()) return;
+    if (stagingPasteCount() > 0)
+      throw new Error("Wait for pasted text attachments to finish preparing.");
+    const length = getComposerPromptLengthFeedback(text);
+    if (length.message) throw new Error(length.message);
     if (delivery === "steer" && !canSteer())
       throw new Error("This turn cannot take steering input. Queue the message instead.");
     const local = slashChoices().find((value) => value.title === text.trim() && !value.category);
@@ -1272,6 +1394,8 @@ function ThreadConversation(
     }
     const scope = props.scope;
     const { text: outgoingText, records } = resolveFileMentions(text, mentions());
+    const preparedLength = getComposerPromptLengthFeedback(outgoingText);
+    if (preparedLength.message) throw new Error(preparedLength.message);
     const captured = {
       text,
       mentions: mentions(),
@@ -1340,6 +1464,10 @@ function ThreadConversation(
     );
   }
   async function launchFanout(attempt: FanoutAttempt) {
+    if (stagingPasteCount() > 0)
+      throw new Error("Wait for pasted text attachments to finish preparing.");
+    const length = getComposerPromptLengthFeedback(attempt.text);
+    if (length.message) throw new Error(length.message);
     if (
       disposed ||
       props.state()?.environmentId !== environmentId ||
@@ -1405,6 +1533,15 @@ function ThreadConversation(
     }
   }
   function chooseFanoutModels() {
+    if (stagingPasteCount() > 0) {
+      props.ui.notify("Wait for pasted text attachments to finish preparing.", true);
+      return;
+    }
+    const length = getComposerPromptLengthFeedback(composer?.plainText ?? draft());
+    if (length.message) {
+      props.ui.notify(length.message, true);
+      return;
+    }
     if (sending()) {
       props.ui.notify("Wait for the current message to finish sending.");
       return;
@@ -1532,6 +1669,30 @@ function ThreadConversation(
   }
   useKeyboard((key) => {
     if (!props.focused || props.ui.modal()) return;
+    if (
+      composer?.focused &&
+      !requestFocus() &&
+      !key.ctrl &&
+      !key.meta &&
+      !key.shift &&
+      (key.name === "up" || key.name === "down")
+    ) {
+      const direction = key.name === "up" ? "backward" : "forward";
+      const recalled = promptHistory.step({
+        direction,
+        messages: props.projection().messages,
+        draft: captureDraft(),
+        atVisualEdge: isPromptHistoryCaretAtEdge(composer, direction),
+        hasSelection: composer.hasSelection(),
+      });
+      if (recalled) {
+        key.preventDefault();
+        key.stopPropagation();
+        owner.apply(recalled);
+        composer.gotoBufferEnd();
+        return;
+      }
+    }
     if (!requestFocus() && key.ctrl && key.name === "f") {
       key.preventDefault();
       findPrompt();
@@ -1872,6 +2033,29 @@ function ThreadConversation(
           </text>
         )}
       </Show>
+      <GoalCard />
+      <Show when={stagingPasteCount() > 0}>
+        <text fg={theme.textMuted} paddingX={1}>
+          Preparing pasted text…
+        </text>
+      </Show>
+      <Show when={pasteInline()}>
+        <text
+          selectable={false}
+          fg={theme.primary}
+          paddingX={1}
+          onMouseDown={() => setPasteInline(false)}
+        >
+          Next text paste stays inline · Cancel
+        </text>
+      </Show>
+      <Show when={promptLength().message}>
+        {(message) => (
+          <text fg={theme.error} paddingX={1} wrapMode="word">
+            {message()}
+          </text>
+        )}
+      </Show>
       <box flexDirection="row" paddingX={1} height={1}>
         <text
           selectable={false}
@@ -1965,11 +2149,13 @@ function ThreadConversation(
           cursorColor={theme.primary}
           onContentChange={() => {
             if (!composer || composer.isDestroyed) return;
+            promptHistory.onEdit(composer.plainText);
             if (composer.plainText === lastComposerText) return;
             lastComposerText = composer.plainText;
             setDraft(composer.plainText);
             saveDraft();
           }}
+          onPaste={pasteText}
           keyBindings={[
             { name: "a", ctrl: true, action: "select-all" },
             {
@@ -2018,6 +2204,8 @@ function ThreadConversation(
                     { title: "Attach files", run: attach },
                     { title: "Add context", run: contextMenu },
                     { title: "Saved prompts", run: savedPrompts },
+                    { title: "Goal", run: goals.open },
+                    { title: "Paste next text inline", run: () => setPasteInline(true) },
                     { title: "Model options", run: options },
                     {
                       title: `Permissions: ${runtimeLabels[thread().runtimeMode]}`,
@@ -2101,6 +2289,8 @@ export function ConversationPanel(
   props: FeatureProps & {
     searchTarget?: ThreadSearchTarget | undefined;
     onSearchTargetHandled?: (target: ThreadSearchTarget) => void;
+    goalRequestScope?: string | undefined;
+    onGoalRequestHandled?: () => void;
   },
 ) {
   const scope = () =>

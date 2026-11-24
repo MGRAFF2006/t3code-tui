@@ -1,4 +1,5 @@
 import { scrollbarOptions } from "../ui/scroll.ts";
+import { selectOptionAtPointer, scrollSelectOptions } from "../ui/native-select.ts";
 import { useKeyboard, useTerminalDimensions } from "@opentui/solid";
 import type { Renderable } from "@opentui/core";
 import { createEffect, createMemo, createSignal, For, on, onCleanup, Show } from "solid-js";
@@ -53,7 +54,11 @@ interface SettingsEntry extends Choice {
 }
 
 export function SettingsPanel(
-  props: FeatureProps & { initialProviderId?: ProviderInstanceId | undefined },
+  props: FeatureProps & {
+    initialProviderId?: ProviderInstanceId | undefined;
+    searchRequested?: boolean | undefined;
+    onSearchOpened?: () => void;
+  },
 ) {
   const dimensions = useTerminalDimensions();
   const [panelWidth, setPanelWidth] = createSignal(0);
@@ -915,11 +920,17 @@ export function SettingsPanel(
     });
   }
 
-  const entries = createMemo<SettingsEntry[]>(() => {
-    if (["usage", "maintenance", "access", "secrets"].includes(section())) return extras.entries();
-    if (section() === "terminal") return terminal.entries();
+  function entriesForSection(active: SectionName): SettingsEntry[] {
+    if (
+      active === "usage" ||
+      active === "maintenance" ||
+      active === "access" ||
+      active === "secrets"
+    )
+      return extras.entriesForSection(active);
+    if (active === "terminal") return terminal.entries();
     const value = settings();
-    if (section() === "connections")
+    if (active === "connections")
       return [
         {
           title: "Current environment",
@@ -1016,7 +1027,7 @@ export function SettingsPanel(
                 }, "Signed in to T3 Connect."),
         },
       ];
-    if (section() === "providers")
+    if (active === "providers")
       return providers().map((entry) => ({
         title: entry.displayName ?? entry.driver,
         value: entry.enabled ? entry.status : "Disabled",
@@ -1142,7 +1153,8 @@ export function SettingsPanel(
         },
       },
     ];
-  });
+  }
+  const entries = createMemo(() => entriesForSection(section()));
 
   function switchSection(value: SectionName) {
     setSection(value);
@@ -1168,9 +1180,46 @@ export function SettingsPanel(
       })),
     );
   }
+  function searchSettings() {
+    props.ui.choose(
+      "Search settings",
+      sections.flatMap(([name, label]) =>
+        entriesForSection(name).map((entry) => ({
+          title: entry.title,
+          description: [entry.value, entry.description].filter(Boolean).join(" · "),
+          category: label,
+          searchText: `${entry.title} ${entry.description ?? ""} ${entry.value ?? ""}`,
+          run: () => {
+            switchSection(name);
+            const index = entriesForSection(name).findIndex((value) => value.title === entry.title);
+            const current = entriesForSection(name)[index];
+            if (!current) {
+              props.ui.notify("This setting is no longer available. Search again.", true);
+              return;
+            }
+            setIndex(index);
+            current.run();
+          },
+        })),
+      ),
+    );
+  }
+  createEffect(
+    on(
+      () => props.searchRequested,
+      (requested) => {
+        if (!requested) return;
+        searchSettings();
+        props.onSearchOpened?.();
+      },
+    ),
+  );
   useKeyboard((event) => {
-    if (!props.focused || props.ui.modal() || event.ctrl || event.meta) return;
-    if (event.name === "1") switchSection("environment");
+    if (!props.focused || props.ui.modal()) return;
+    if ((event.ctrl && event.name === "f") || (!event.ctrl && !event.meta && event.name === "/"))
+      searchSettings();
+    else if (event.ctrl || event.meta) return;
+    else if (event.name === "1") switchSection("environment");
     else if (event.name === "2") switchSection("providers");
     else if (event.name === "3") switchSection("connections");
     else if (event.name === "4") switchSection("usage");
@@ -1226,6 +1275,7 @@ export function SettingsPanel(
               <Show when={section() === "providers"}>
                 <Action label="Add [n]" onPress={addProvider} />
               </Show>
+              <Action label="Search [/]" onPress={searchSettings} />
             </box>
             <box
               paddingX={1}
@@ -1271,6 +1321,7 @@ export function SettingsPanel(
           >
             {sections.find(([name]) => name === section())?.[1]} ▾
           </text>
+          <Action label="Search [/]" onPress={searchSettings} />
           <Show when={section() === "providers"}>
             <Action label="Add [n]" onPress={addProvider} />
           </Show>
@@ -1297,7 +1348,11 @@ export function SettingsPanel(
           selectedIndex={index()}
           onChange={(value) => setIndex(value)}
           onSelect={(value) => entries()[value]?.run()}
-          onMouseDown={() => setPane("list")}
+          onMouseDown={(event) => {
+            selectOptionAtPointer(event);
+            setPane("list");
+          }}
+          onMouseScroll={scrollSelectOptions}
           focused={props.focused && !props.ui.modal() && pane() === "list"}
           backgroundColor={theme.background}
           focusedBackgroundColor={theme.background}

@@ -1,3 +1,4 @@
+import { selectOptionAtPointer, scrollSelectOptions } from "../ui/native-select.ts";
 import { scrollbarOptions } from "../ui/scroll.ts";
 import { DiffRenderable, pathToFiletype } from "@opentui/core";
 import { extend, useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/solid";
@@ -336,7 +337,11 @@ export function PullRequestDiffPanel(
           selectedIndex={selected()}
           onChange={setSelected}
           onSelect={() => setPane("diff")}
-          onMouseDown={() => setPane("list")}
+          onMouseDown={(event) => {
+            selectOptionAtPointer(event);
+            setPane("list");
+          }}
+          onMouseScroll={scrollSelectOptions}
           backgroundColor={theme.background}
           focusedBackgroundColor={theme.background}
           textColor={theme.text}

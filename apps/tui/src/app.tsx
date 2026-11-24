@@ -1,3 +1,4 @@
+import { threadOrganizationChoices } from "./features/thread-organization.ts";
 import { scrollbarOptions } from "./ui/scroll.ts";
 import type { ScrollBoxRenderable } from "@opentui/core";
 import {
@@ -128,6 +129,8 @@ export function App(props: { client: TuiClient | null; demo?: boolean; onExit: (
   });
   const [state, setState] = createSignal<TuiSnapshot | null>(props.client?.snapshot() ?? null);
   const [area, setArea] = createSignal<Area>("chat");
+  const [settingsSearchRequested, setSettingsSearchRequested] = createSignal(false);
+  const [goalRequestScope, setGoalRequestScope] = createSignal<string>();
   const [settingsProviderTarget, setSettingsProviderTarget] = createSignal<{
     environmentId: string;
     instanceId: ProviderInstanceId;
@@ -442,6 +445,34 @@ export function App(props: { client: TuiClient | null; demo?: boolean; onExit: (
       }
     });
   }
+  function searchSettings() {
+    const check = scope();
+    void run(async () => {
+      if (!(await beforeNavigate())) return;
+      check();
+      setSettingsProviderTarget(undefined);
+      setArea("settings");
+      setFocus("main");
+      setSettingsSearchRequested(true);
+    });
+  }
+  function showGoals() {
+    const check = scope();
+    const id = state()?.selectedThreadId;
+    if (!id) {
+      notify("Select a conversation before opening its goal.");
+      return;
+    }
+    void run(async () => {
+      if (!(await beforeNavigate())) return;
+      check();
+      if (state()?.selectedThreadId !== id)
+        throw new Error("The conversation changed. Open its goal again.");
+      setArea("chat");
+      setFocus("main");
+      setGoalRequestScope(`${state()?.environmentId}/${id}`);
+    });
+  }
   function views() {
     const icons: Record<Area, IconName> = {
       chat: "thread",
@@ -740,46 +771,7 @@ export function App(props: { client: TuiClient | null; demo?: boolean; onExit: (
             });
         },
       },
-      {
-        title: target.snoozedUntil ? "Unsnooze thread" : "Snooze thread…",
-        run: () => {
-          if (target.snoozedUntil)
-            void run(async () => {
-              check();
-              await dispatch({
-                type: "thread.unsnooze",
-                commandId: commandId(),
-                threadId: id,
-                reason: "user",
-              });
-            });
-          else
-            form({
-              title: "Snooze thread",
-              description: "Use an ISO date and time including its timezone.",
-              fields: [
-                {
-                  name: "until",
-                  label: "Until",
-                  value: DateTime.formatIso(DateTime.add(DateTime.nowUnsafe(), { hours: 1 })),
-                  required: true,
-                },
-              ],
-              onSubmit: async (values) => {
-                check();
-                const until = DateTime.makeUnsafe(values.until!);
-                if (DateTime.toEpochMillis(until) <= DateTime.toEpochMillis(DateTime.nowUnsafe()))
-                  throw new Error("Choose a future time.");
-                await dispatch({
-                  type: "thread.snooze",
-                  commandId: commandId(),
-                  threadId: id,
-                  snoozedUntil: DateTime.formatIso(until),
-                });
-              },
-            });
-        },
-      },
+      ...threadOrganizationChoices(feature(), target),
       { title: "Mark unread", run: () => action("thread.mark-unread") },
       {
         title: "Related threads and context…",
@@ -1180,6 +1172,13 @@ export function App(props: { client: TuiClient | null; demo?: boolean; onExit: (
       },
       { title: "Switch thread", category: "Threads", run: switchThread },
       { title: "Thread actions", category: "Threads", run: () => threadActions() },
+      {
+        title: "Goal",
+        category: "Agent",
+        description: "Set, inspect and manage this conversation's provider goal.",
+        run: showGoals,
+      },
+      { title: "Search settings", category: "Settings", run: searchSettings },
       {
         title: "Upload provider feedback",
         category: "Agent",
@@ -1768,6 +1767,8 @@ export function App(props: { client: TuiClient | null; demo?: boolean; onExit: (
                         ui={ui}
                         focused={activeFocus() === "main"}
                         onFocus={() => setFocus("main")}
+                        goalRequestScope={goalRequestScope()}
+                        onGoalRequestHandled={() => setGoalRequestScope(undefined)}
                         searchTarget={searchTarget()}
                         onSearchTargetHandled={(target) => {
                           if (searchTarget() === target) setSearchTarget(undefined);
@@ -1802,6 +1803,8 @@ export function App(props: { client: TuiClient | null; demo?: boolean; onExit: (
                         ui={ui}
                         focused={activeFocus() === "main"}
                         onFocus={() => setFocus("main")}
+                        searchRequested={settingsSearchRequested()}
+                        onSearchOpened={() => setSettingsSearchRequested(false)}
                         initialProviderId={
                           settingsProviderTarget()?.environmentId === environment()
                             ? settingsProviderTarget()?.instanceId

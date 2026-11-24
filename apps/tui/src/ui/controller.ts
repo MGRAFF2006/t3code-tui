@@ -16,6 +16,7 @@ export interface Choice {
   color?: string;
   description?: string | undefined;
   category?: string | undefined;
+  searchText?: string;
   run: () => void;
 }
 export interface Field {

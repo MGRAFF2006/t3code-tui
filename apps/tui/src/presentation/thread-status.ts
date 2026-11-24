@@ -3,6 +3,7 @@ import {
   hasUnseenCompletion,
   hasUnseenRunFailure,
   threadWokeAt,
+  isThreadWokeUnseen,
 } from "@t3tools/client-runtime/state/thread-settled";
 import { icon } from "./icons.ts";
 import { theme } from "../theme/index.ts";
@@ -14,11 +15,12 @@ export function threadStatus(thread: EnvironmentThreadShell | null, now: string)
   if ((thread.pendingGuestMessageCount ?? 0) > 0) return "request";
   const runtime = thread.runtime;
   const wokeAt = threadWokeAt(thread, { now });
-  const visitedAt = thread.lastVisitedAt ? Date.parse(thread.lastVisitedAt) : NaN;
-  const woken =
-    thread.settledOverride !== "settled" &&
-    wokeAt !== null &&
-    (!Number.isFinite(visitedAt) || visitedAt < Date.parse(wokeAt));
+  const woken = isThreadWokeUnseen({
+    wokeAt,
+    settled: thread.settledOverride === "settled",
+    lastVisitedAt: thread.lastVisitedAt,
+    latestRunCompletedAt: thread.latestRun?.completedAt ?? null,
+  });
   if (runtime?.status === "running" && thread.blockedOnThreadWait) return "waiting";
   switch (runtime?.status) {
     case "queued":

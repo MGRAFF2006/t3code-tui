@@ -125,7 +125,16 @@ it.each([
   })),
   ...(
     [
-      { name: "unseen snooze wake", changes: {}, expected: "woken" },
+      { name: "unseen snooze wake", changes: { latestRunCompletedAt: null }, expected: "woken" },
+      { name: "completion at wake counts as seen", changes: {}, expected: "ready" },
+      {
+        name: "completion after wake replaces wake indicator",
+        changes: {
+          lastVisitedAt: DateTime.makeUnsafe("2026-06-19T23:59:00Z"),
+          latestRunCompletedAt: DateTime.makeUnsafe("2026-06-20T00:00:30Z"),
+        },
+        expected: "done",
+      },
       { name: "acknowledged wake", changes: { lastVisitedAt: v2Now }, expected: "ready" },
       { name: "settled wake", changes: { settledOverride: "settled" }, expected: "ready" },
       { name: "active work after wake", changes: { status: "running" }, expected: "working" },
