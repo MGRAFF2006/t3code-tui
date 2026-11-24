@@ -22,6 +22,9 @@ export const threadLayoutKey = (environmentId: string, threadId: string) =>
   JSON.stringify([environmentId, threadId]);
 
 const Preferences = Schema.Struct({
+  sidebarGrouping: Schema.Literals(["flat", "project"]).pipe(
+    Schema.withDecodingDefault(Effect.succeed("flat")),
+  ),
   threadDetailsItems: Schema.Record(Schema.String, Schema.Boolean).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
   ),

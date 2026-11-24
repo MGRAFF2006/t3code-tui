@@ -68,6 +68,7 @@ describe("terminal preferences", () => {
           unsubscribe();
           const reopened = yield* Effect.promise(() => createPreferences(directory));
           expect(reopened.get()).toEqual({
+            sidebarGrouping: "flat",
             threadLayouts: {},
             threadDetailsItems: {},
             icons: "nerd",

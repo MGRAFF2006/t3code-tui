@@ -11,6 +11,13 @@ import {
   terminalActivityLabel,
 } from "../presentation/terminal-activity.ts";
 import { theme } from "../theme/index.ts";
+import {
+  createThreadDraftMarker,
+  threadProviderIdentity,
+  threadPullRequestIndicator,
+  threadRelationship,
+} from "../presentation/sidebar-metadata.ts";
+import { icon } from "../presentation/icons.ts";
 
 export function ThreadPicker(props: {
   client: TuiClient | null;
@@ -19,6 +26,10 @@ export function ThreadPicker(props: {
   onCancel: () => void;
 }) {
   const [query, setQuery] = createSignal("");
+  const [draftError, setDraftError] = createSignal<string>();
+  const hasDraft = props.client
+    ? createThreadDraftMarker(props.client, setDraftError)
+    : () => false;
   const environmentId = createMemo(() => props.state()?.environmentId);
   const selectedThreadId = createMemo(() => props.state()?.selectedThreadId);
   const projects = createMemo(() => props.state()?.shell?.projects);
@@ -43,15 +54,29 @@ export function ThreadPicker(props: {
         ),
         selectedThreadId() === row.thread.id,
       );
+      const provider = threadProviderIdentity(row.thread, props.state()?.config?.providers ?? []);
+      const relationship = threadRelationship(row.thread);
+      const pullRequest = threadPullRequestIndicator(row.thread);
+      const unsent = hasDraft(id, row.thread.id, selectedThreadId());
       return {
-        title: `${status.symbol} ${row.thread.title}`,
+        title: `${status.symbol} ${relationship ? `${relationship.symbol} ` : ""}${row.thread.title}`,
         color: status.color,
         value: row.thread.id,
         indicator: activity().has(row.thread.id)
           ? { label: terminalActivityLabel(activity().get(row.thread.id)!), color: theme.error }
-          : undefined,
+          : unsent
+            ? { label: `${icon("draft")} Draft`, color: theme.warning }
+            : { label: provider.symbol, color: provider.color },
         category: row.source === "message" ? "In messages" : "Threads",
-        description: [projectTitles().get(row.thread.projectId), row.thread.branch, row.hint]
+        description: [
+          projectTitles().get(row.thread.projectId),
+          row.thread.branch,
+          provider.label,
+          relationship?.label,
+          pullRequest?.label,
+          unsent ? "Unsent draft" : undefined,
+          row.hint,
+        ]
           .filter(Boolean)
           .join(" · "),
       };
@@ -67,6 +92,7 @@ export function ThreadPicker(props: {
       emptyMessage={result().loading ? "Searching messages…" : "No matching threads"}
       status={
         result().error ??
+        draftError() ??
         (result().loading
           ? "Searching messages…"
           : (props.state()?.label ?? "Selected environment"))

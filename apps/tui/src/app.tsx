@@ -1,3 +1,12 @@
+import { createThreadSelectionActions } from "./features/thread-selection.ts";
+import {
+  createThreadDraftMarker,
+  threadProviderIdentity,
+  threadRelationship,
+  threadPullRequestIndicator,
+  threadFolderIndicator,
+} from "./presentation/sidebar-metadata.ts";
+import { threadProjectGroups } from "./presentation/thread-grouping.ts";
 import { threadOrganizationChoices } from "./features/thread-organization.ts";
 import { scrollbarOptions } from "./ui/scroll.ts";
 import type { ScrollBoxRenderable } from "@opentui/core";
@@ -171,6 +180,16 @@ export function App(props: { client: TuiClient | null; demo?: boolean; onExit: (
   const [busy, setBusy] = createSignal(false);
   const [search, setSearch] = createSignal("");
   const [filter, setFilter] = createSignal<ThreadFilter>("active");
+  const [sidebarGrouping, setSidebarGrouping] = createSignal(
+    props.client?.preferences().sidebarGrouping ?? "flat",
+  );
+  const [collapsedProjects, setCollapsedProjects] = createSignal<ReadonlySet<string>>(new Set());
+  const [selection, setSelection] = createSignal<{
+    environment: string | null;
+    ids: ReadonlySet<string>;
+  }>({ environment: null, ids: new Set() });
+  const selectedThreadIds = () =>
+    selection().environment === environment() ? selection().ids : new Set<string>();
   const [selectedRow, setSelectedRow] = createSignal(0);
   const [selectedSearchThread, setSelectedSearchThread] = createSignal<string>();
   const [searchTarget, setSearchTarget] = createSignal<ThreadSearchTarget>();
@@ -183,6 +202,7 @@ export function App(props: { client: TuiClient | null; demo?: boolean; onExit: (
   const unsubscribe = props.client?.subscribe(setState);
   const unsubscribePreferences = props.client?.subscribePreferences((value) => {
     setAppearance(value.theme);
+    setSidebarGrouping(value.sidebarGrouping);
     setIconPreference(value.icons);
     if (resizingPanel() !== "left") setSidebarWidth(value.sidebarWidth);
     if (resizingPanel() !== "right") setWorkspaceWidth(value.workspaceWidth);
@@ -891,6 +911,13 @@ export function App(props: { client: TuiClient | null; demo?: boolean; onExit: (
       });
     };
     choose(target.title, [
+      {
+        title: selectedThreadIds().has(id) ? "Deselect thread" : "Select thread",
+        run: () => toggleThreadSelection(id),
+      },
+      ...(selectedThreadIds().size
+        ? [{ title: "Selected thread actions…", run: selectedThreadActions }]
+        : []),
       ...(id === state()?.selectedThreadId
         ? [{ title: "Thread details", run: showThreadDetails }]
         : []),
@@ -1355,6 +1382,22 @@ export function App(props: { client: TuiClient | null; demo?: boolean; onExit: (
       },
       { title: "Switch thread", category: "Threads", run: switchThread },
       { title: "Thread actions", category: "Threads", run: () => threadActions() },
+      { title: "Selected thread actions", category: "Threads", run: selectedThreadActions },
+      {
+        title: "Select visible threads",
+        category: "Threads",
+        run: () =>
+          setSelection({
+            environment: environment() ?? null,
+            ids: new Set(rows().map((thread) => thread.id)),
+          }),
+      },
+      {
+        title: "Clear thread selection",
+        category: "Threads",
+        run: () => setSelection({ environment: environment() ?? null, ids: new Set() }),
+      },
+      { title: "Sidebar grouping", category: "Layout", run: configureGrouping },
       { title: "Thread details", category: "Threads", run: showThreadDetails },
       {
         title: "Configure thread detail rows",
@@ -1494,7 +1537,7 @@ export function App(props: { client: TuiClient | null; demo?: boolean; onExit: (
   function shortcuts() {
     ui.text(
       "Keyboard shortcuts",
-      "Ctrl+P  Commands\nCtrl+K  Switch thread\nCtrl+N  New thread\nCtrl+B  Toggle sidebar (thread picker in narrow windows)\nCtrl+E  Toggle workspace panel\nCtrl+T  Open thread terminal (Ctrl+] returns)\nCtrl+A  Select all in the focused text box\n/requests  Focus approvals and questions\nAlt+1…7  Navigate sections\nAlt+[ / Alt+]  Back / Forward\nF6  Move focus between panes\nCtrl+Q  Quit\n\nLists: arrows to select, Enter to open; mouse also works.\nForms: Tab changes field; arrows choose options; Ctrl+S or F2 saves.\nConversation shortcuts appear below the composer.\n\nAppearance: Ctrl+P → Terminal appearance (System / Light / Dark).\n\nPanel widths: drag the dividers; right-click or use Ctrl+P → Panel widths.\n\nThread colours and symbols:\nBlue ◌ Working\nPurple ? Needs input\nAmber △ Approval · ! Usage/budget limit\nPink @ Guest request\nGreen ✓ Done\nYellow ◷ Woken\nRed ! Failed · credentials/provider errors\nRed ● Terminal command running (number = terminals)\nGrey ⊙ Waiting on related/background work\nNormal text: Ready/already seen (no status icon)\nPins appear separately at the right of each row.",
+      "Ctrl+P  Commands\nCtrl+K  Switch thread\nCtrl+N  New thread\nCtrl+B  Toggle sidebar (thread picker in narrow windows)\nCtrl+E  Toggle workspace panel\nCtrl+T  Open thread terminal (Ctrl+] returns)\nCtrl+A  Select all in the focused text box\n/requests  Focus approvals and questions\nAlt+1…7  Navigate sections\nAlt+[ / Alt+]  Back / Forward\nF6  Move focus between panes\nCtrl+Q  Quit\n\nLists: arrows to select, Enter to open; mouse also works.\nSidebar: Ctrl+Space or Ctrl+click toggles thread selection; F2 opens selected actions; Escape clears selection. Click Threads or use Sidebar grouping to choose project folders.\nForms: Tab changes field; arrows choose options; Ctrl+S or F2 saves.\nConversation shortcuts appear below the composer.\n\nAppearance: Ctrl+P → Terminal appearance (System / Light / Dark).\n\nPanel widths: drag the dividers; right-click or use Ctrl+P → Panel widths.\n\nThread colours and symbols:\nBlue ◌ Working\nPurple ? Needs input\nAmber △ Approval · ! Usage/budget limit\nPink @ Guest request\nGreen ✓ Done\nYellow ◷ Woken\nRed ! Failed · credentials/provider errors\nRed ● Terminal command running (number = terminals)\nGrey ⊙ Waiting on related/background work\nNormal text: Ready/already seen (no status icon)\nPins appear separately at the right of each row.",
     );
   }
   function matches(entry: OrchestrationV2ThreadShell) {
@@ -1527,7 +1570,7 @@ export function App(props: { client: TuiClient | null; demo?: boolean; onExit: (
       state()?.selectedThreadId === entry.id,
     );
   }
-  const rows = createMemo(() => {
+  const orderedRows = createMemo(() => {
     if (searching()) return threadSearch().rows.map((row) => row.thread);
     const presented = allThreads()
       .filter(matches)
@@ -1544,6 +1587,62 @@ export function App(props: { client: TuiClient | null; demo?: boolean; onExit: (
       ...sortActiveThreadsByOrderKey(presented.filter((value) => !value.source.pinnedAt)),
     ].map((value) => value.source);
   });
+  const groups = createMemo(() => threadProjectGroups(orderedRows()));
+  const grouped = () => sidebarGrouping() === "project" && !searching();
+  const rows = createMemo(() =>
+    grouped()
+      ? groups().flatMap((group) => (collapsedProjects().has(group.key) ? [] : group.threads))
+      : orderedRows(),
+  );
+  const rowPositions = createMemo(() => new Map(rows().map((thread, index) => [thread.id, index])));
+  function toggleThreadSelection(id: string) {
+    const ids = new Set(selectedThreadIds());
+    if (ids.has(id)) ids.delete(id);
+    else ids.add(id);
+    setSelection({ environment: environment() ?? null, ids });
+  }
+  function selectedThreadActions() {
+    if (!selectedThreadIds().size) {
+      notify("Select threads with Ctrl+Space on a sidebar row, or use Select visible threads.");
+      return;
+    }
+    const capturedEnvironment = environment();
+    const actions = createThreadSelectionActions(
+      feature(),
+      [...selectedThreadIds()],
+      (completed) => {
+        if (environment() !== capturedEnvironment) return;
+        const ids = new Set(selectedThreadIds());
+        for (const id of completed) ids.delete(id);
+        setSelection({ environment: environment() ?? null, ids });
+      },
+    );
+    choose(`${selectedThreadIds().size} selected threads`, [
+      ...actions.choices,
+      {
+        title: "Clear selection",
+        run: () => setSelection({ environment: environment() ?? null, ids: new Set() }),
+      },
+    ]);
+  }
+  function configureGrouping() {
+    choose("Sidebar grouping", [
+      ...(
+        [
+          ["flat", "Flat across projects"],
+          ["project", "Group by project"],
+        ] as const
+      ).map(([value, title]) => ({
+        title,
+        run: () => void run(() => client().updatePreferences({ sidebarGrouping: value })),
+      })),
+      { title: "Expand all folders", run: () => setCollapsedProjects(new Set()) },
+      {
+        title: "Collapse all folders",
+        run: () => setCollapsedProjects(new Set(groups().map((group) => group.key))),
+      },
+    ]);
+  }
   const rowIndex = () => {
     const held = searching() ? rows().findIndex((row) => row.id === selectedSearchThread()) : -1;
     return held >= 0 ? held : Math.max(0, Math.min(selectedRow(), rows().length - 1));
@@ -1589,16 +1688,27 @@ export function App(props: { client: TuiClient | null; demo?: boolean; onExit: (
             ? "sidebar"
             : "main",
       );
+    else if (
+      activeFocus() === "sidebar" &&
+      event.ctrl &&
+      event.name === "space" &&
+      rows()[rowIndex()]
+    )
+      toggleThreadSelection(rows()[rowIndex()]!.id);
     else if (activeFocus() === "sidebar" && event.name === "up") moveRow(-1);
     else if (activeFocus() === "sidebar" && event.name === "down") moveRow(1);
+    else if (activeFocus() === "sidebar" && event.name === "escape" && selectedThreadIds().size)
+      setSelection({ environment: environment() ?? null, ids: new Set() });
     else if (activeFocus() === "sidebar" && event.name === "escape" && search()) {
       setSearch("");
       setSelectedRow(0);
       setSelectedSearchThread(undefined);
     } else if (activeFocus() === "sidebar" && event.name === "return" && rows()[rowIndex()])
       openSidebarThread(rows()[rowIndex()]!);
-    else if (activeFocus() === "sidebar" && event.name === "f2") threadActions(rows()[rowIndex()]);
-    else return;
+    else if (activeFocus() === "sidebar" && event.name === "f2") {
+      if (selectedThreadIds().size) selectedThreadActions();
+      else threadActions(rows()[rowIndex()]);
+    } else return;
     event.preventDefault();
     event.stopPropagation();
   });
@@ -1612,6 +1722,128 @@ export function App(props: { client: TuiClient | null; demo?: boolean; onExit: (
           setSelectedRow(0);
         },
       })),
+    );
+  }
+  function folderIndicator(threads: readonly OrchestrationV2ThreadShell[]) {
+    snoozeRevision();
+    const id = environment();
+    return id ? threadFolderIndicator(threads, id, DateTime.formatIso(serverNow())) : null;
+  }
+  const draftMarker = props.client
+    ? createThreadDraftMarker(props.client, (message) => notify(message, true))
+    : () => false;
+  function SidebarThread(row: { entry: OrchestrationV2ThreadShell; index: number }) {
+    const entry = row.entry;
+    const index = () => row.index;
+    const identity = () => threadProviderIdentity(entry, state()?.config?.providers ?? []);
+    const relationship = () => threadRelationship(entry);
+    const pullRequest = () => threadPullRequestIndicator(entry);
+    const selected = () => state()?.selectedThreadId === entry.id;
+    const status = createMemo(() => threadAppearance(entry));
+    const result = () => (searching() ? searchRowsById().get(entry.id) : undefined);
+    const cursor = () => activeFocus() === "sidebar" && rows()[rowIndex()]?.id === entry.id;
+    return (
+      <box flexShrink={0}>
+        <Show
+          when={
+            result()?.source === "message" && threadSearch().rows[index() - 1]?.source !== "message"
+          }
+        >
+          <text height={1} fg={theme.textMuted}>
+            In messages
+          </text>
+        </Show>
+        <box
+          id={`thread-${entry.id}`}
+          flexDirection="row"
+          height={1}
+          backgroundColor={selected() || cursor() ? theme.sidebarSelected : theme.sidebar}
+          onMouseDown={(event) => {
+            if (event.button === 2) {
+              if (selectedThreadIds().has(entry.id)) selectedThreadActions();
+              else threadActions(entry);
+            } else if (event.modifiers.ctrl || event.modifiers.alt) toggleThreadSelection(entry.id);
+            else openSidebarThread(entry);
+          }}
+        >
+          <Show when={selectedThreadIds().has(entry.id)}>
+            <text selectable={false} fg={theme.primary} width={2}>
+              ✓{" "}
+            </text>
+          </Show>
+          <text selectable={false} width={2} flexShrink={0} fg={status().color}>
+            {status().symbol}
+          </text>
+          <text
+            selectable={false}
+            flexGrow={1}
+            minWidth={0}
+            height={1}
+            truncate
+            fg={status().color}
+          >
+            {entry.title}
+          </text>
+          <Show when={draftMarker(environment(), entry.id, state()?.selectedThreadId)}>
+            <text selectable={false} fg={theme.textMuted}>
+              {" "}
+              draft
+            </text>
+          </Show>
+          <TerminalActivity
+            count={terminalActivity().get(entry.id) ?? 0}
+            onOpen={() => showThreadTerminals(entry.id)}
+          />
+          <Show when={entry.pinnedAt}>
+            <text selectable={false} width={2} flexShrink={0} fg={theme.textMuted}>
+              {` ${icon("pin")}`}
+            </text>
+          </Show>
+        </box>
+        <box
+          height={1}
+          flexShrink={0}
+          flexDirection="row"
+          gap={1}
+          paddingLeft={2}
+          onMouseDown={() => threadActions(entry)}
+        >
+          <text selectable={false} fg={identity().color} flexShrink={0}>
+            {identity().symbol}
+          </text>
+          <Show when={relationship()}>
+            {(value) => (
+              <text selectable={false} fg={theme.textMuted} flexShrink={0}>
+                {value().symbol}
+              </text>
+            )}
+          </Show>
+          <Show when={pullRequest()}>
+            {(value) => (
+              <text selectable={false} height={1} truncate fg={value().color}>
+                {value().label}
+              </text>
+            )}
+          </Show>
+        </box>
+        <Show when={result()?.hint}>
+          <text
+            selectable={false}
+            height={1}
+            truncate
+            paddingLeft={2}
+            fg={theme.textMuted}
+            onMouseDown={(event) => {
+              if (event.button === 2) {
+                if (selectedThreadIds().has(entry.id)) selectedThreadActions();
+                else threadActions(entry);
+              } else openSidebarThread(entry);
+            }}
+          >
+            {result()?.hint}
+          </text>
+        </Show>
+      </box>
     );
   }
   return (
@@ -1668,7 +1900,11 @@ export function App(props: { client: TuiClient | null; demo?: boolean; onExit: (
                 </text>
               </box>
               <box height={1} flexShrink={0} flexDirection="row" justifyContent="space-between">
-                <text fg={theme.text}>Threads</text>
+                <text
+                  selectable={false}
+                  fg={theme.text}
+                  onMouseDown={configureGrouping}
+                >{`Threads (${orderedRows().length})`}</text>
                 <text selectable={false} fg={theme.textMuted} onMouseDown={filterPicker}>
                   {searching() ? "all shelves" : `${filter()} ▾`}
                 </text>
@@ -1688,6 +1924,16 @@ export function App(props: { client: TuiClient | null; demo?: boolean; onExit: (
                 focusedTextColor={theme.text}
                 cursorColor={theme.primary}
               />
+              <Show when={selectedThreadIds().size > 0}>
+                <text
+                  selectable={false}
+                  height={1}
+                  flexShrink={0}
+                  truncate
+                  fg={theme.primary}
+                  onMouseDown={selectedThreadActions}
+                >{`${selectedThreadIds().size} selected · Actions F2`}</text>
+              </Show>
               <Show when={searching() && (threadSearch().loading || threadSearch().error)}>
                 <text
                   height={1}
@@ -1706,80 +1952,64 @@ export function App(props: { client: TuiClient | null; demo?: boolean; onExit: (
                 flexGrow={1}
                 minHeight={0}
               >
-                <For each={rows()}>
-                  {(entry, index) => {
-                    const selected = () => state()?.selectedThreadId === entry.id;
-                    const status = createMemo(() => threadAppearance(entry));
-                    const result = () => (searching() ? searchRowsById().get(entry.id) : undefined);
-                    const cursor = () =>
-                      activeFocus() === "sidebar" && rows()[rowIndex()]?.id === entry.id;
-                    return (
+                <Show
+                  when={grouped()}
+                  fallback={
+                    <For each={rows()}>
+                      {(entry, index) => <SidebarThread entry={entry} index={index()} />}
+                    </For>
+                  }
+                >
+                  <For each={groups()}>
+                    {(group) => (
                       <box flexShrink={0}>
-                        <Show
-                          when={
-                            result()?.source === "message" &&
-                            threadSearch().rows[index() - 1]?.source !== "message"
-                          }
-                        >
-                          <text height={1} fg={theme.textMuted}>
-                            In messages
-                          </text>
-                        </Show>
-                        <box
-                          id={`thread-${entry.id}`}
-                          flexDirection="row"
+                        <text
+                          selectable={false}
                           height={1}
-                          backgroundColor={
-                            selected() || cursor() ? theme.sidebarSelected : theme.sidebar
-                          }
-                          onMouseDown={(event) => {
-                            if (event.button === 2) threadActions(entry);
-                            else openSidebarThread(entry);
+                          truncate
+                          fg={theme.textMuted}
+                          onMouseDown={() => {
+                            const next = new Set(collapsedProjects());
+                            if (next.has(group.key)) next.delete(group.key);
+                            else next.add(group.key);
+                            setCollapsedProjects(next);
                           }}
                         >
-                          <text selectable={false} width={2} flexShrink={0} fg={status().color}>
-                            {status().symbol}
-                          </text>
-                          <text
-                            selectable={false}
-                            flexGrow={1}
-                            minWidth={0}
-                            height={1}
-                            truncate
-                            fg={status().color}
+                          {`${collapsedProjects().has(group.key) ? "▸" : "▾"} ${group.pinned ? "Pinned · " : ""}${shell()?.projects.find((project) => project.id === group.projectId)?.title ?? "Project"} (${group.threads.length})`}
+                          <Show
+                            when={
+                              collapsedProjects().has(group.key) && folderIndicator(group.threads)
+                            }
                           >
-                            {entry.title}
-                          </text>
-                          <TerminalActivity
-                            count={terminalActivity().get(entry.id) ?? 0}
-                            onOpen={() => showThreadTerminals(entry.id)}
-                          />
-                          <Show when={entry.pinnedAt}>
-                            <text selectable={false} width={2} flexShrink={0} fg={theme.textMuted}>
-                              {` ${icon("pin")}`}
-                            </text>
+                            {(value) => (
+                              <span style={{ fg: value().color }}>{` ● ${value().label}`}</span>
+                            )}
                           </Show>
-                        </box>
-                        <Show when={result()?.hint}>
-                          <text
-                            selectable={false}
-                            height={1}
-                            truncate
-                            paddingLeft={2}
-                            fg={theme.textMuted}
-                            onMouseDown={(event) => {
-                              if (event.button === 2) threadActions(entry);
-                              else openSidebarThread(entry);
-                            }}
-                          >
-                            {result()?.hint}
-                          </text>
+                        </text>
+                        <Show when={!collapsedProjects().has(group.key)}>
+                          <For each={group.threads}>
+                            {(entry) => (
+                              <SidebarThread
+                                entry={entry}
+                                index={rowPositions().get(entry.id) ?? 0}
+                              />
+                            )}
+                          </For>
                         </Show>
                       </box>
-                    );
-                  }}
-                </For>
-                <Show when={rows().length === 0}>
+                    )}
+                  </For>
+                  <Show when={groups().length > 0}>
+                    <text
+                      selectable={false}
+                      fg={theme.textMuted}
+                      onMouseDown={() => setCollapsedProjects(new Set())}
+                    >
+                      Expand all folders
+                    </text>
+                  </Show>
+                </Show>
+                <Show when={orderedRows().length === 0}>
                   <text fg={theme.textMuted} wrapMode="word" marginTop={1}>
                     {searching()
                       ? threadSearch().loading

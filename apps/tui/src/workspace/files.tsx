@@ -25,6 +25,8 @@ import { DelimitedPreview } from "./delimited.tsx";
 import { NotebookPreview } from "./notebook.tsx";
 import { hexPreview } from "./file-preview.logic.ts";
 import { openInEnvironmentEditor } from "../features/editor.ts";
+import { ArchivePreview } from "./archive.tsx";
+import { readZipPreview, type ZipPreview } from "./archive.logic.ts";
 
 interface OpenFile {
   cwd: string;
@@ -51,6 +53,12 @@ export function FilesPanel(
   const [preferences, setPreferences] = createSignal(props.client.preferences());
   onCleanup(props.client.subscribePreferences(setPreferences));
   const [opened, setOpened] = createSignal<OpenFile | null>(null);
+  const [archive, setArchive] = createSignal<{
+    cwd: string;
+    environmentId: string | null;
+    path: string;
+    entries: ZipPreview;
+  } | null>(null);
   const [preview, setPreview] = createSignal(false);
   const [reading, setReading] = createSignal(false);
   const [saving, setSaving] = createSignal(false);
@@ -117,6 +125,7 @@ export function FilesPanel(
         readVersion += 1;
         setReading(false);
         setOpened(null);
+        setArchive(null);
         setPreview(false);
       },
     ),
@@ -133,6 +142,18 @@ export function FilesPanel(
     const version = ++readVersion;
     setReading(true);
     try {
+      if (/\.(zip|jar)$/i.test(path)) {
+        const asset = await props.client.readAsset({ _tag: "draft-workspace-file", cwd, path });
+        if (version !== readVersion || environmentId !== environment() || cwd !== props.cwd())
+          return;
+        const entries = await readZipPreview(asset.bytes);
+        if (version !== readVersion || environmentId !== environment() || cwd !== props.cwd())
+          return;
+        setOpened(null);
+        setArchive({ cwd, environmentId, path, entries });
+        if (reveal) setPreview(true);
+        return;
+      }
       const file = await request(props.client, WS_METHODS.projectsReadFile, {
         cwd,
         relativePath: path,
@@ -144,6 +165,7 @@ export function FilesPanel(
       )
         return;
       setOpened({ cwd, environmentId, file, draft: file.contents, editing: false });
+      setArchive(null);
       setFormattedPreview(/\.(md|markdown|csv|tsv|ipynb)$/i.test(path));
       setNotebookImages(false);
       if (reveal) {
@@ -181,6 +203,16 @@ export function FilesPanel(
     const cwd = props.cwd();
     const environmentId = environment();
     const current = opened();
+    const currentArchive = archive();
+    if (
+      currentArchive &&
+      (currentArchive.cwd !== cwd || currentArchive.environmentId !== environmentId)
+    ) {
+      readVersion += 1;
+      setArchive(null);
+      setReading(false);
+      setPreview(false);
+    }
     if (
       current &&
       (current.cwd !== cwd || current.environmentId !== environmentId) &&
@@ -393,12 +425,25 @@ export function FilesPanel(
     const destination = environment();
     const row = rows()[active()]?.entry;
     const path = preview()
-      ? opened()?.file.relativePath
+      ? (archive()?.path ?? opened()?.file.relativePath)
       : row?.kind === "file"
         ? row.path
         : undefined;
     props.ui.choose("File actions", [
       { title: "Find ignored file", run: ignoredFiles },
+      ...(path && /\.(zip|jar)$/i.test(path)
+        ? [
+            {
+              title: "Browse ZIP entries",
+              description: "Native folders, text and hex; download limit 20 MiB.",
+              run: () => {
+                if (cwd !== props.cwd() || destination !== environment())
+                  throw new Error("The workspace changed. Select the archive again.");
+                openFile(path);
+              },
+            },
+          ]
+        : []),
       ...(path && cwd
         ? [
             {
@@ -558,7 +603,7 @@ export function FilesPanel(
   }
 
   useActiveKeyboard(
-    () => props.visible && props.focused && !props.ui.modal(),
+    () => props.visible && props.focused && !props.ui.modal() && !(preview() && archive()),
     (event) => {
       if (event.meta) return;
       if (opened()?.editing) {
@@ -615,6 +660,9 @@ export function FilesPanel(
         <text selectable={false} fg={theme.textMuted} onMouseDown={fileActions}>
           Actions ▾
         </text>
+        <Show when={reading()}>
+          <text fg={theme.textMuted}>Loading…</text>
+        </Show>
         <Show when={opened() && !opened()?.editing}>
           <text selectable={false} fg={theme.primary} onMouseDown={edit}>
             Edit
@@ -682,11 +730,115 @@ export function FilesPanel(
         <Show when={!props.compact || preview()}>
           <box flexGrow={1} minWidth={0} minHeight={0} paddingX={1}>
             <Show
-              when={opened()}
+              when={archive()}
               fallback={
-                <text fg={theme.textMuted} wrapMode="word">
-                  Select a file to preview its contents.
-                </text>
+                <Show
+                  when={opened()}
+                  fallback={
+                    <text fg={theme.textMuted} wrapMode="word">
+                      Select a file to preview its contents.
+                    </text>
+                  }
+                >
+                  {(current) => (
+                    <>
+                      <text
+                        fg={theme.textMuted}
+                        truncate
+                        flexShrink={0}
+                      >{`${current().file.relativePath}${dirty() ? " *" : ""}${reading() ? "  Loading…" : ""}`}</text>
+                      <Show
+                        when={
+                          current().cwd !== props.cwd() ||
+                          current().environmentId !== props.state()?.environmentId
+                        }
+                      >
+                        <text
+                          fg={theme.warning}
+                          wrapMode="word"
+                        >{`Draft from ${current().cwd}. Reconnect to its environment before saving.`}</text>
+                      </Show>
+                      <Show when={current().file.truncated}>
+                        <text fg={theme.warning} wrapMode="word">
+                          Truncated preview. This file is read-only.
+                        </text>
+                      </Show>
+                      <Show
+                        when={current().editing}
+                        fallback={
+                          <scrollbox
+                            scrollbarOptions={scrollbarOptions()}
+                            ref={(value) => {
+                              codeScroll = value;
+                            }}
+                            flexGrow={1}
+                            minHeight={0}
+                            scrollX
+                            scrollY
+                            onMouseDown={() => {
+                              props.onFocus();
+                              setPreview(true);
+                            }}
+                          >
+                            <Show
+                              when={formattedPreview()}
+                              fallback={
+                                <code
+                                  content={current().file.contents}
+                                  filetype={pathToFiletype(current().file.relativePath) ?? "text"}
+                                  syntaxStyle={syntax}
+                                  drawUnstyledText
+                                  wrapMode={preferences().wordWrap ? "word" : "none"}
+                                />
+                              }
+                            >
+                              <Show
+                                when={/\.ipynb$/i.test(current().file.relativePath)}
+                                fallback={
+                                  <Show
+                                    when={/\.(csv|tsv)$/i.test(current().file.relativePath)}
+                                    fallback={
+                                      <MarkdownMessage
+                                        content={current().file.contents}
+                                        streaming={false}
+                                        syntax={syntax}
+                                        wordWrap={preferences().wordWrap}
+                                      />
+                                    }
+                                  >
+                                    <DelimitedPreview
+                                      name={current().file.relativePath}
+                                      contents={current().file.contents}
+                                    />
+                                  </Show>
+                                }
+                              >
+                                <NotebookPreview
+                                  images={notebookImages()}
+                                  toggleImages={() => setNotebookImages((value) => !value)}
+                                  contents={current().file.contents}
+                                  syntax={syntax}
+                                  wrap={preferences().wordWrap}
+                                  truncated={current().file.truncated}
+                                />
+                              </Show>
+                            </Show>
+                          </scrollbox>
+                        }
+                      >
+                        <FileEditor
+                          wrap={preferences().wordWrap}
+                          path={current().file.relativePath}
+                          contents={current().draft}
+                          focused={props.visible && props.focused && !props.ui.modal() && !saving()}
+                          onFocus={props.onFocus}
+                          onChange={(draft) => setOpened((value) => value && { ...value, draft })}
+                          onHighlightError={(message) => props.ui.notify(message)}
+                        />
+                      </Show>
+                    </>
+                  )}
+                </Show>
               }
             >
               {(current) => (
@@ -695,103 +847,24 @@ export function FilesPanel(
                     fg={theme.textMuted}
                     truncate
                     flexShrink={0}
-                  >{`${current().file.relativePath}${dirty() ? " *" : ""}${reading() ? "  Loading…" : ""}`}</text>
-                  <Show
-                    when={
-                      current().cwd !== props.cwd() ||
-                      current().environmentId !== props.state()?.environmentId
-                    }
-                  >
-                    <text
-                      fg={theme.warning}
-                      wrapMode="word"
-                    >{`Draft from ${current().cwd}. Reconnect to its environment before saving.`}</text>
-                  </Show>
-                  <Show when={current().file.truncated}>
-                    <text fg={theme.warning} wrapMode="word">
-                      Truncated preview. This file is read-only.
-                    </text>
-                  </Show>
-                  <Show
-                    when={current().editing}
-                    fallback={
-                      <scrollbox
-                        scrollbarOptions={scrollbarOptions()}
-                        ref={(value) => {
-                          codeScroll = value;
-                        }}
-                        flexGrow={1}
-                        minHeight={0}
-                        scrollX
-                        scrollY
-                        onMouseDown={() => {
-                          props.onFocus();
-                          setPreview(true);
-                        }}
-                      >
-                        <Show
-                          when={formattedPreview()}
-                          fallback={
-                            <code
-                              content={current().file.contents}
-                              filetype={pathToFiletype(current().file.relativePath) ?? "text"}
-                              syntaxStyle={syntax}
-                              drawUnstyledText
-                              wrapMode={preferences().wordWrap ? "word" : "none"}
-                            />
-                          }
-                        >
-                          <Show
-                            when={/\.ipynb$/i.test(current().file.relativePath)}
-                            fallback={
-                              <Show
-                                when={/\.(csv|tsv)$/i.test(current().file.relativePath)}
-                                fallback={
-                                  <MarkdownMessage
-                                    content={current().file.contents}
-                                    streaming={false}
-                                    syntax={syntax}
-                                    wordWrap={preferences().wordWrap}
-                                  />
-                                }
-                              >
-                                <DelimitedPreview
-                                  name={current().file.relativePath}
-                                  contents={current().file.contents}
-                                />
-                              </Show>
-                            }
-                          >
-                            <NotebookPreview
-                              images={notebookImages()}
-                              toggleImages={() => setNotebookImages((value) => !value)}
-                              contents={current().file.contents}
-                              syntax={syntax}
-                              wrap={preferences().wordWrap}
-                              truncated={current().file.truncated}
-                            />
-                          </Show>
-                        </Show>
-                      </scrollbox>
-                    }
-                  >
-                    <FileEditor
-                      wrap={preferences().wordWrap}
-                      path={current().file.relativePath}
-                      contents={current().draft}
-                      focused={props.visible && props.focused && !props.ui.modal() && !saving()}
-                      onFocus={props.onFocus}
-                      onChange={(draft) => setOpened((value) => value && { ...value, draft })}
-                      onHighlightError={(message) => props.ui.notify(message)}
-                    />
-                  </Show>
+                  >{`${current().path}${reading() ? "  Loading…" : ""}`}</text>
+                  <ArchivePreview
+                    archive={current().entries}
+                    focused={props.visible && props.focused && preview() && !props.ui.modal()}
+                    onFocus={() => {
+                      props.onFocus();
+                      setPreview(true);
+                    }}
+                    onClose={() => setPreview(false)}
+                    onActions={fileActions}
+                  />
                 </>
               )}
             </Show>
           </box>
         </Show>
       </box>
-      <Show when={!opened()?.editing}>
+      <Show when={!opened()?.editing && !(preview() && archive())}>
         <text fg={theme.textMuted} paddingX={1} flexShrink={0}>
           {preview()
             ? "↑↓ scroll · e edit · esc files · / find"

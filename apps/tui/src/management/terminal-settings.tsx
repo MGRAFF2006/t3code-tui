@@ -29,6 +29,16 @@ export function createTerminalSettings(props: FeatureProps) {
       run: () => chooseTerminalAppearance(props),
     },
     {
+      title: "Sidebar grouping",
+      value: preferences().sidebarGrouping === "project" ? "By project" : "Flat across projects",
+      description: "Keep one flat list or show collapsible project folders within each shelf.",
+      run: () =>
+        props.ui.choose("Sidebar grouping", [
+          { title: "Flat across projects", run: () => save({ sidebarGrouping: "flat" }) },
+          { title: "Group by project", run: () => save({ sidebarGrouping: "project" }) },
+        ]),
+    },
+    {
       title: "Tool visibility",
       value: toolVisibilityLabels[preferences().toolCallVisibility],
       description: "Show all, hide successful calls, hide all calls, or focus on replies with Zen.",

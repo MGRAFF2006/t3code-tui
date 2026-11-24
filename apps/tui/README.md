@@ -36,6 +36,10 @@ Use **Linked pull requests and issues** in thread actions or Commands to link, i
 
 Thread actions include configured snooze presets, custom times and durations, unsnooze, wake dismissal, and **Reorder thread**. Reordering persists within the pinned or active section across projects. Dismissing a wake clears that notification without opening the conversation.
 
+**Settings → Terminal → Sidebar grouping**, **Ctrl+P → Sidebar grouping**, or the **Threads** heading optionally groups each shelf into collapsible project folders with counts and attention indicators. Flat ordering across projects stays the default. Use the grouping menu to expand or collapse every folder.
+
+In the sidebar, **Ctrl+Space** or **Ctrl+click** toggles a thread selection. Thread actions also offer **Select thread**; Commands offers **Select visible threads** and **Clear thread selection**. **F2** or the selected-count row opens bulk pin, settle, snooze, archive, unread, title and permanent-delete actions. Each target keeps its owning environment and permissions; partial failures remain selected with individual results. Escape clears the selection.
+
 Sidebar search and **Ctrl+K** use T3's desktop matching for titles, projects, branches and pull requests. Search spans the selected environment's non-archived shelves; clearing it restores the sidebar filter. Message-history matches appear under **In messages** with a snippet and open find at the matching message. Message search needs a word of at least three letters, or two for Chinese, Japanese and Korean. Press Escape to clear sidebar search.
 
 Drag either sidebar's divider to resize it. For exact widths, right-click a divider, use **Ctrl+P → Panel widths**, or open **Settings → Terminal → Panel widths**. Widths are saved for this terminal client. Smaller windows temporarily constrain them to leave room for the conversation; expanding the window restores your preferred sizes. The right panel also supports automatic sizing. **Reset panel widths** restores both defaults.
@@ -98,6 +102,8 @@ PR and issue lists support named **Saved views** for their project, filters and 
 | Scheduled tasks   | Create/edit/run/enable/disable/delete; interval, daily/weekly, one-time and webhook triggers; delivery history and webhook configuration                                                                                                                                                                                                |
 | Settings          | Providers/auth/install/configuration, models and environment variables, connections, usage/pricing/history, storage/maintenance/diagnostics/update controls, access grants/revocation, secret sources, integrations, ACP Registry, quotas and reset credits, ChatGPT profile handoff, server keybindings and local terminal preferences |
 | Browser           | Shared browser sessions, discovered servers, profile IDs, native navigation and cache controls, viewport/appearance/zoom/reload/close controls and explicit opening in this device's browser                                                                                                                                            |
+
+Open a ZIP or JAR in Files to browse its folders, search entries and read text or hexadecimal previews natively. Back returns through the archive to the file list; File actions remain available. Archive previews are bounded and read-only.
 
 Workspace also exposes named terminal sessions, device hosts and device actions. **Open workspace in environment editor**, and the corresponding Files action, launch an available editor on the computer hosting that environment. External-viewer actions download a bounded private copy and open it on this computer.
 

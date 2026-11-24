@@ -30,6 +30,10 @@ const glyphs = {
   collapse: ["\uf0d7", "▾"],
   add: ["\uf067", "+"],
   commands: ["\uf0c9", "⌘"],
+  fork: ["\ue727", "⑂"],
+  subagent: ["\uf0e8", "↳"],
+  sideChat: ["\uf086", "↪"],
+  draft: ["\uf044", "✎"],
 } as const;
 export type IconName = keyof typeof glyphs;
 
