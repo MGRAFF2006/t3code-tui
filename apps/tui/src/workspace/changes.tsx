@@ -1,3 +1,6 @@
+import { ConversationFindText } from "../conversation/find-text.tsx";
+import { revealTextMatch } from "../ui/reveal-match.ts";
+import { findThreadSearchOccurrences } from "@t3tools/shared/threadSearch";
 import { scrollbarOptions } from "../ui/scroll.ts";
 import { DiffRenderable, pathToFiletype, type ScrollBoxRenderable } from "@opentui/core";
 import { extend, useRenderer, useTerminalDimensions } from "@opentui/solid";
@@ -20,7 +23,8 @@ extend({ workspace_diff: DiffRenderable });
 export function ChangesPanel(
   props: WorkspaceContext & { visible: boolean; compact?: boolean | undefined },
 ) {
-  const syntax = createSyntax(useRenderer().nativeScene);
+  const renderer = useRenderer();
+  const syntax = createSyntax(renderer.nativeScene);
   const dimensions = useTerminalDimensions();
   onCleanup(() => syntax.destroy());
   const [scope, setScope] = createSignal<"working-tree" | "branch-range" | "commit">(
@@ -30,6 +34,13 @@ export function ChangesPanel(
   const [base, setBase] = createSignal("");
   const [selected, setSelected] = createSignal(0);
   const [reviewing, setReviewing] = createSignal(false);
+  const [diffFind, setDiffFind] = createSignal<{ query: string; key: string } | null>(null);
+  const [findQuery, setFindQuery] = createSignal("");
+  const [occurrence, setOccurrence] = createSignal(0);
+  let disposed = false;
+  onCleanup(() => {
+    disposed = true;
+  });
   const [preferences, setPreferences] = createSignal(props.client.preferences());
   onCleanup(props.client.subscribePreferences(setPreferences));
   const split = () => preferences().diffView === "split";
@@ -114,7 +125,48 @@ export function ChangesPanel(
     },
   );
 
+  const findKey = () =>
+    JSON.stringify([environment(), props.cwd(), source()?.diffHash, currentFile()?.path]);
+  const activeFind = () => (diffFind()?.key === findKey() ? diffFind() : null);
+  const matches = createMemo(() =>
+    activeFind()
+      ? findThreadSearchOccurrences(patch()?.source?.diff ?? "", activeFind()!.query)
+      : [],
+  );
+  const activeOccurrence = () =>
+    matches().length
+      ? ((occurrence() % matches().length) + matches().length) % matches().length
+      : 0;
+  function findInDiff() {
+    if (patch.loading || !patch()?.source || !currentFile()) {
+      props.ui.notify("Wait for a file diff to load before searching.", true);
+      return;
+    }
+    const captured = findKey();
+    props.ui.form({
+      title: "Find in diff",
+      description:
+        "Search this loaded file's wrapped unified patch. Closing Find restores its layout. Truncated patches contain only the server's available text.",
+      fields: [{ name: "query", label: "Find text", value: findQuery(), required: true }],
+      submitLabel: "Find",
+      onSubmit: async ({ query = "" }) => {
+        if (captured !== findKey() || patch.loading || !patch()?.source)
+          throw new Error("The selected diff changed. Open Find again.");
+        if (!query.length) throw new Error("Enter text to find.");
+        setFindQuery(query);
+        setOccurrence(0);
+        setDiffFind({ query, key: captured });
+        setReviewing(true);
+      },
+    });
+  }
+  function stepMatch(direction: number) {
+    if (!activeFind()) return findInDiff();
+    if (matches().length) setOccurrence(activeOccurrence() + direction);
+  }
+
   function select(index: number) {
+    setDiffFind(null);
     setSelected(Math.max(0, Math.min(files().length - 1, index)));
     const file = currentFile();
     if (file) fileScroll?.scrollChildIntoView(`workspace-change-${file.path}`);
@@ -253,7 +305,11 @@ export function ChangesPanel(
     () => props.visible && props.focused && !props.ui.modal(),
     (event) => {
       if (event.meta) return;
-      if (event.name === "s") chooseScope();
+      if (event.ctrl && event.name === "f") findInDiff();
+      else if (event.ctrl && event.name === "g") stepMatch(event.shift ? -1 : 1);
+      else if (event.ctrl) return;
+      else if (event.name === "escape" && activeFind()) setDiffFind(null);
+      else if (event.name === "s") chooseScope();
       else if (event.name === "f") void props.ui.run(fileVersions);
       else if (event.name === "/") chooseFile();
       else if (event.name === "o") openCurrentFile();
@@ -284,7 +340,7 @@ export function ChangesPanel(
 
   return (
     <box visible={props.visible} flexGrow={1} minHeight={0} onMouseDown={props.onFocus}>
-      <box flexDirection="row" gap={2} height={1} flexShrink={0} paddingX={1}>
+      <box flexDirection="row" flexWrap="wrap" gap={2} minHeight={1} flexShrink={0} paddingX={1}>
         <text selectable={false} fg={theme.primary} onMouseDown={chooseScope}>
           {scope() === "working-tree"
             ? "Uncommitted ▾"
@@ -297,6 +353,9 @@ export function ChangesPanel(
           fg={theme.textMuted}
           onMouseDown={chooseFile}
         >{`${files().length} files`}</text>
+        <text selectable={false} fg={theme.primary} onMouseDown={findInDiff}>
+          Find ^F
+        </text>
         <text selectable={false} fg={theme.textMuted} onMouseDown={() => toggleSplit()}>
           {split() ? "Split" : "Unified"}
         </text>
@@ -308,6 +367,29 @@ export function ChangesPanel(
           Versions
         </text>
       </box>
+      <Show when={activeFind()}>
+        {(finding) => (
+          <box height={1} flexShrink={0} paddingX={1} flexDirection="row" gap={2}>
+            <text
+              selectable={false}
+              flexGrow={1}
+              minWidth={0}
+              truncate
+              fg={theme.textMuted}
+              onMouseDown={findInDiff}
+            >{`Find: ${finding().query} · ${matches().length ? activeOccurrence() + 1 : 0}/${matches().length}`}</text>
+            <text selectable={false} fg={theme.primary} onMouseDown={() => stepMatch(-1)}>
+              Prev
+            </text>
+            <text selectable={false} fg={theme.primary} onMouseDown={() => stepMatch(1)}>
+              Next
+            </text>
+            <text selectable={false} fg={theme.textMuted} onMouseDown={() => setDiffFind(null)}>
+              Close
+            </text>
+          </box>
+        )}
+      </Show>
       <Show when={metadata.loading}>
         <text fg={theme.textMuted} paddingX={1}>
           Loading changes…
@@ -404,13 +486,37 @@ export function ChangesPanel(
             >
               <Show when={!patch.loading && patch()?.source}>
                 {(value) => (
-                  <DiffContent
-                    source={value()}
-                    path={currentFile()?.path ?? ""}
-                    split={split() && dimensions().width >= 110 && !props.compact}
-                    syntax={syntax}
-                    wrap={preferences().wordWrap}
-                  />
+                  <Show
+                    when={activeFind()}
+                    fallback={
+                      <DiffContent
+                        source={value()}
+                        path={currentFile()?.path ?? ""}
+                        split={split() && dimensions().width >= 110 && !props.compact}
+                        syntax={syntax}
+                        wrap={preferences().wordWrap}
+                      />
+                    }
+                  >
+                    {(finding) => (
+                      <ConversationFindText
+                        segments={[value().diff]}
+                        query={finding().query}
+                        activeOccurrence={activeOccurrence()}
+                        wordWrap
+                        onActiveMatch={(node, offset) => {
+                          const captured = findKey();
+                          revealTextMatch(
+                            diffScroll,
+                            node,
+                            offset,
+                            renderer,
+                            () => !disposed && captured === findKey() && Boolean(activeFind()),
+                          );
+                        }}
+                      />
+                    )}
+                  </Show>
                 )}
               </Show>
             </scrollbox>
@@ -419,8 +525,8 @@ export function ChangesPanel(
       </box>
       <text fg={theme.textMuted} flexShrink={0} paddingX={1}>
         {reviewing()
-          ? "↑↓ scroll · n/p file · esc files · f versions · o open · s scope"
-          : "↑↓ file · enter review · / find · f versions · s scope · v view · w whitespace"}
+          ? "↑↓ scroll · ^F find text · ^G next · n/p file · esc back · f versions"
+          : "↑↓ file · enter review · / files · ^F find text · f versions · s scope"}
       </text>
     </box>
   );

@@ -1,3 +1,4 @@
+import { ResetCountdown } from "../presentation/activity-time.tsx";
 import { createEffect, createMemo, createSignal, on, onCleanup, Show } from "solid-js";
 import { useRenderer } from "@opentui/solid";
 import {
@@ -432,6 +433,7 @@ export function createConversationStatus(
               <text height={1} truncate fg={theme.textMuted}>
                 {recovery()?.description ?? value().message}
               </text>
+              <ResetCountdown resetAt={recovery()?.resetAt} environmentId={environmentId} />
             </box>
           )}
         </Show>

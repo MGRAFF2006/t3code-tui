@@ -73,6 +73,10 @@ Consecutive tool and reasoning activity collapses into a work group. Expand a gr
 
 With an empty composer, **Up/Down** at its first/last visual line recalls sent prompts and then returns to the empty draft. Editing a recalled prompt ends history navigation. Supported thread and environment references return with the text. Length feedback appears before sending an oversized prompt. Large pastes become text attachments when the environment supports files; **More → Paste next text inline**, or `/paste-inline`, keeps the next paste inline. Generated paste files remain in this client's private local data so drafts and saved prompts can reuse them; automatic cleanup is not yet available.
 
+**Side chats** above the conversation or in Commands opens native main/side-chat tabs. Create a side chat from stable context, close its local tab, reopen it, bring a finished reply back to the main thread, or delete it with confirmation. Closing keeps its conversation and draft; deleting clears that side chat’s local draft after the server accepts deletion. Closed tabs are remembered for this App session.
+
+Work groups and individual work entries show elapsed time when their timestamps are available. Active labels update once per second; completed work stays fixed. Deferred history without complete timing stays unlabeled. Usage-limit notices show a reset countdown alongside their recovery actions.
+
 **Ctrl+P → Goal**, `/goal`, or **More → Goal** opens goal creation, progress and lifecycle controls. The goal card shows provider-reported progress. Available actions follow the selected provider's capabilities; changing a goal preserves the composer draft.
 
 **Ctrl+P → Search settings**, or **Ctrl+F** or **/** inside Settings, searches the available native settings by name, section and description. In management lists, click to select a row, use the wheel to move, and press Enter to open it.
@@ -84,6 +88,10 @@ With an empty composer, **Up/Down** at its first/last visual line recalls sent p
 Provider and conversation warnings offer recovery actions through **Actions**, **Recovery**, or `/status` followed by Tab. Open the selected provider's setup, refresh its status, inspect the full error, or restore a dismissed notice. For usage limits, **Resume at reset** and **Snooze until reset** are independent choices; **Cancel auto-resume** and **Wake now** reverse them. ChatGPT account usage management opens in your browser.
 
 When an interrupted or usage-limited turn can continue, **Resume thread**, `/resume`, or sending with an empty composer resumes it. Pending requests and active work must be resolved first. A held queue resumes after the continuation is accepted.
+
+**Settings → Usage** includes native daily/hourly provider charts for processed tokens and known cost, provider visibility, paging and exact period details. Unknown prices and incomplete sources remain visible. Hourly windows use explicit timestamps and are limited to 24 hours.
+
+In **Changes**, **Ctrl+F** or **Find** searches the loaded file’s patch. **Ctrl+G / Ctrl+Shift+G** navigate exact matches; Escape or Close restores the chosen diff layout. Find temporarily shows a wrapped unified patch and respects server truncation.
 
 PR and issue lists support named **Saved views** for their project, filters and sorting. PR lists refresh when the server reports changes; if live refresh fails, **R** refreshes manually. PR actions expose commits and older comments within review conversations where the source host supports paging.
 

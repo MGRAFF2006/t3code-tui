@@ -1,3 +1,4 @@
+import { createSideChats, SideChatTabs } from "./features/side-chat.tsx";
 import { createThreadSelectionActions } from "./features/thread-selection.ts";
 import {
   createThreadDraftMarker,
@@ -1315,6 +1316,9 @@ export function App(props: { client: TuiClient | null; demo?: boolean; onExit: (
     chooseModel,
     threadActions: () => threadActions(),
   };
+  const sideChats = props.client
+    ? createSideChats({ ...feature(), navigationVersion: () => navigationRequest })
+    : null;
   function switchThread() {
     const check = scope();
     setModal({
@@ -1382,6 +1386,7 @@ export function App(props: { client: TuiClient | null; demo?: boolean; onExit: (
       },
       { title: "Switch thread", category: "Threads", run: switchThread },
       { title: "Thread actions", category: "Threads", run: () => threadActions() },
+      ...(sideChats ? [{ title: "Side chats", category: "Threads", run: sideChats.actions }] : []),
       { title: "Selected thread actions", category: "Threads", run: selectedThreadActions },
       {
         title: "Select visible threads",
@@ -2210,6 +2215,18 @@ export function App(props: { client: TuiClient | null; demo?: boolean; onExit: (
                     }
                   >
                     <Show when={area() === "chat"}>
+                      <Show when={sideChats}>
+                        {(controller) => (
+                          <SideChatTabs
+                            client={connectedClient()}
+                            state={state}
+                            ui={ui}
+                            focused={activeFocus() === "main"}
+                            onFocus={() => setFocus("main")}
+                            controller={controller()}
+                          />
+                        )}
+                      </Show>
                       <ConversationPanel
                         client={connectedClient()}
                         state={state}

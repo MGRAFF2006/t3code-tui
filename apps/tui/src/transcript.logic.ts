@@ -11,6 +11,7 @@ import {
 } from "@t3tools/client-runtime/work-log/presentation";
 import { turnItemOutputText } from "@t3tools/client-runtime/work-log/item-detail";
 import * as DateTime from "effect/DateTime";
+import type { ActivityTiming } from "./presentation/activity-time.logic.ts";
 
 export interface TranscriptRow {
   readonly key: string;
@@ -259,4 +260,23 @@ export function summarizeTranscriptWork(entries: TranscriptRow["entries"]) {
     active,
     hasFailure,
   };
+}
+
+export function transcriptWorkElapsed(entries: TranscriptRow["entries"]): ActivityTiming | null {
+  if (!entries.length) return null;
+  let startedAt = Infinity;
+  let completedAt = 0;
+  let active = false;
+  let missingCompletion = false;
+  for (const entry of entries) {
+    const item = entry.item;
+    if (!isWork(entry) || item.deferredWork || item.startedAt === null) return null;
+    startedAt = Math.min(startedAt, DateTime.toEpochMillis(item.startedAt));
+    active ||= isOrchestrationV2WorkActive(item.status);
+    if (item.completedAt === null) missingCompletion = true;
+    else completedAt = Math.max(completedAt, DateTime.toEpochMillis(item.completedAt));
+  }
+  return !active && missingCompletion
+    ? null
+    : { startedAt, completedAt: active ? null : completedAt };
 }

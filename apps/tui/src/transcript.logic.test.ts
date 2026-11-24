@@ -21,6 +21,7 @@ import {
 } from "../../../packages/client-runtime/src/state/orchestrationV2TestFixtures.ts";
 import {
   groupTranscriptItems,
+  transcriptWorkElapsed,
   summarizeTranscriptWork,
   visibleTranscriptItems,
   visibleTranscriptFallbackMessages,
@@ -119,6 +120,46 @@ describe("terminal work groups", () => {
     };
     expect(summarizeTranscriptWork([deferred, failed]).label).toBe("Work · 50 items");
   });
+});
+
+it("measures the wall span of overlapping work and leaves deferred or unknown timing unavailable", () => {
+  const start = DateTime.makeUnsafe("2026-11-24T10:00:00Z");
+  const middle = DateTime.add(start, { seconds: 10 });
+  const end = DateTime.add(start, { seconds: 30 });
+  const first = {
+    ...call("first"),
+    item: {
+      ...call("first").item,
+      startedAt: start,
+      completedAt: DateTime.add(start, { seconds: 20 }),
+    },
+  };
+  const second = {
+    ...call("second"),
+    item: { ...call("second").item, startedAt: middle, completedAt: end },
+  };
+  expect(transcriptWorkElapsed([first, second])).toEqual({
+    startedAt: DateTime.toEpochMillis(start),
+    completedAt: DateTime.toEpochMillis(end),
+  });
+  expect(
+    transcriptWorkElapsed([
+      first,
+      { ...second, item: { ...second.item, status: "running", completedAt: null } },
+    ]),
+  ).toEqual({ startedAt: DateTime.toEpochMillis(start), completedAt: null });
+  expect(transcriptWorkElapsed([first, call("unknown")])).toBeNull();
+  expect(
+    transcriptWorkElapsed([
+      {
+        ...first,
+        item: {
+          ...first.item,
+          deferredWork: { cursor: "earlier", itemCount: 20, lastOrdinal: 19 },
+        },
+      },
+    ]),
+  ).toBeNull();
 });
 
 describe("terminal tool visibility", () => {

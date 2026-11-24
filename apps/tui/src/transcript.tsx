@@ -1,5 +1,8 @@
+import { ElapsedActivity } from "./presentation/activity-time.tsx";
+import type { ActivityTiming } from "./presentation/activity-time.logic.ts";
 import type {
   AssetResource,
+  EnvironmentId,
   OrchestrationV2ProjectedTurnItem,
   OrchestrationV2ThreadProjection,
   OrchestrationV2TurnItem,
@@ -55,6 +58,7 @@ import { icon } from "./presentation/icons.ts";
 import { messageLinks } from "./presentation/links.ts";
 import {
   groupTranscriptItems,
+  transcriptWorkElapsed,
   summarizeTranscriptWork,
   transcriptItemKey,
   transcriptEntryMatches,
@@ -235,6 +239,8 @@ export function turnItemText(value: OrchestrationV2TurnItem, preview = false) {
 }
 
 function Item(props: {
+  environmentId?: EnvironmentId | null | undefined;
+  timing?: ActivityTiming | null | undefined;
   item: OrchestrationV2TurnItem;
   visibility?: OrchestrationV2ProjectedTurnItem["visibility"];
   syntax: SyntaxStyle;
@@ -453,6 +459,7 @@ function Item(props: {
               : toggle
           }
         >{`${isMessage() || isPlan() ? "" : `${icon(showBody() ? "collapse" : "expand")} `}${summary()}`}</text>
+        <ElapsedActivity timing={props.timing ?? null} environmentId={props.environmentId} />
         <Show when={showBody() && !isMessage()}>
           <text
             selectable={false}
@@ -681,6 +688,7 @@ function Item(props: {
 }
 
 function WorkGroup(props: {
+  environmentId?: EnvironmentId | null | undefined;
   row: TranscriptRow;
   grouped: boolean;
   expanded: boolean;
@@ -765,6 +773,10 @@ function WorkGroup(props: {
           >
             {`${icon(props.expanded ? "collapse" : "expand")} ${summary().label}${summary().active ? ` · ${summary().active} running` : ""}${summary().hasFailure ? " · failed work" : ""}`}
           </text>
+          <ElapsedActivity
+            timing={transcriptWorkElapsed(props.row.entries)}
+            environmentId={props.environmentId}
+          />
           <Show when={hovered()}>
             <RowTimestamp item={props.row.entries[0]!.item} format={props.timestampFormat} />
           </Show>
@@ -798,6 +810,7 @@ function WorkGroup(props: {
 
 export function Transcript(props: {
   projection: OrchestrationV2ThreadProjection;
+  environmentId?: EnvironmentId | null | undefined;
   onOpenItem?: (item: OrchestrationV2ProjectedTurnItem) => void;
   onEditPrompt?: ((item: OrchestrationV2ProjectedTurnItem) => void) | undefined;
   onCopyItem?: (item: OrchestrationV2ProjectedTurnItem) => void;
@@ -928,6 +941,8 @@ export function Transcript(props: {
                 row().entries.some((entry) => expandedGroups().has(transcriptItemKey(entry)))));
           const renderItem = (entry: Accessor<OrchestrationV2ProjectedTurnItem>) => (
             <Item
+              timing={transcriptWorkElapsed([entry()])}
+              environmentId={props.environmentId}
               item={entry().item}
               visibility={entry().visibility}
               onOpenOriginal={() => props.onOpenThread?.(entry().sourceThreadId)}
@@ -979,6 +994,7 @@ export function Transcript(props: {
           return (
             <Show when={visible()}>
               <WorkGroup
+                environmentId={props.environmentId}
                 row={row()}
                 grouped={isGroup()}
                 expanded={expanded()}

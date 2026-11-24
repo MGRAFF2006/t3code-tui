@@ -1,3 +1,4 @@
+import { revealTextMatch } from "../ui/reveal-match.ts";
 import { scrollbarOptions } from "../ui/scroll.ts";
 import type {
   Renderable,
@@ -5,7 +6,7 @@ import type {
   TextareaRenderable,
   TextRenderable,
 } from "@opentui/core";
-import { decodePasteBytes, stripAnsiSequences, TextBuffer, type PasteEvent } from "@opentui/core";
+import { decodePasteBytes, stripAnsiSequences, type PasteEvent } from "@opentui/core";
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/solid";
 import { createEffect, createMemo, createSignal, For, on, onCleanup, Show } from "solid-js";
 import {
@@ -609,35 +610,9 @@ function ThreadConversation(
     },
   });
   function revealFindMatch(node: TextRenderable, offset: number) {
-    const box = history;
-    box?.afterLayout(() => {
-      if (disposed || !findState().open || box.isDestroyed || node.isDestroyed) return;
-      const prefix = node.plainText.slice(0, offset);
-      const measure = TextBuffer.create(renderer.widthMethod, renderer.nativeScene);
-      let column: number;
-      try {
-        measure.setText(prefix);
-        column = measure.length;
-      } finally {
-        measure.destroy();
-      }
-      const lines = node.lineInfo;
-      let line = 0;
-      for (let index = 0; index < lines.lineSources.length; index += 1)
-        if (lines.lineStartCols[index]! <= column) line = index;
-      const y = node.y + line;
-      const x = node.x + column - (lines.lineStartCols[line] ?? 0);
-      const top = box.viewport.y;
-      const left = box.viewport.x;
-      box.scrollTo({
-        y:
-          y < top + 1 || y >= top + box.viewport.height - 1
-            ? box.scrollTop + y - top - 1
-            : box.scrollTop,
-        x: x < left || x >= left + box.viewport.width ? box.scrollLeft + x - left : box.scrollLeft,
-      });
-    });
+    revealTextMatch(history, node, offset, renderer, () => !disposed && findState().open);
   }
+
   onCleanup(find.dispose);
   // Open find follows server-owned history changes, coalescing streamed deltas between searches.
   createEffect(on(props.projection, find.changed, { defer: true }));
@@ -2173,6 +2148,7 @@ function ThreadConversation(
           </box>
         </Show>
         <Transcript
+          environmentId={props.state()?.environmentId}
           cwd={cwd()}
           onOpenLinks={(entry) => messageLinkActions(props, entry)}
           projection={props.projection()}

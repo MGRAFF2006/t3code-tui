@@ -1,4 +1,5 @@
 import {
+  batch,
   createEffect,
   createMemo,
   createSignal,
@@ -30,6 +31,8 @@ import { request, subscribe } from "../rpc/request.ts";
 import { theme } from "../theme/index.ts";
 import { Action, destinationGuard, errorMessage, Section } from "./common.tsx";
 import { setPairingTokenOnUrl } from "@t3tools/shared/remote";
+import { createUsageChart } from "./usage-chart.tsx";
+import { usageChartWindow } from "./usage-chart.logic.ts";
 import { usageSettingsActions } from "./usage-settings.ts";
 import { secretSettingsActions } from "./secrets.tsx";
 import { resourceActions } from "./resources.ts";
@@ -71,6 +74,9 @@ export function createSettingsExtras(
   const environment = createMemo(() => props.state()?.environmentId);
   const [failure, setFailure] = createSignal<string | null>(null);
   const [usage, setUsage] = createSignal<UsageSummary | null>(null);
+  const [usageRange, setUsageRange] = createSignal<UsageSummaryInput | null>(null);
+  const chart = createUsageChart({ summary: usage, window: usageRange, ui: props.ui });
+  const UsageChart = chart.Details;
   const [database, setDatabase] = createSignal<DatabaseStorageStatus | null>(null);
   const [cleanup, setCleanup] = createSignal<StorageCleanupReport | null>(null);
   const [access, setAccess] = createSignal<AuthAccessSnapshot>({
@@ -96,12 +102,14 @@ export function createSettingsExtras(
     setFailure(null);
     try {
       guard();
-      const value = await request(props.client, WS_METHODS.serverGetUsageSummary, {
-        ...range(),
-        awaitRefresh,
-      });
+      const input = { ...range(), awaitRefresh };
+      const value = await request(props.client, WS_METHODS.serverGetUsageSummary, input);
       guard();
-      if (current === generation) setUsage(value);
+      if (current === generation)
+        batch(() => {
+          setUsageRange(input);
+          setUsage(value);
+        });
     } catch (error) {
       if (current === generation) setFailure(errorMessage(error));
     } finally {
@@ -121,6 +129,7 @@ export function createSettingsExtras(
     const stops: (() => void)[] = [];
     if (activeSection === "usage") {
       setUsage(null);
+      setUsageRange(null);
       void untrack(() => refreshUsage());
     }
     if (activeSection === "maintenance") {
@@ -176,17 +185,26 @@ export function createSettingsExtras(
   function usageFilter() {
     const guard = destinationGuard(props);
     const current = range();
+    const now = DateTime.nowUnsafe();
     props.ui.form({
       title: "Usage period",
+      description:
+        "Daily charts use calendar dates; hourly charts use an exact window of up to 24 hours.",
       fields: [
         {
           name: "since",
           label: "First day",
           value: current.sinceDay,
           required: true,
-          description: "YYYY-MM-DD",
+          description: "Daily only, YYYY-MM-DD",
         },
-        { name: "until", label: "Last day", value: current.untilDay, required: true },
+        {
+          name: "until",
+          label: "Last day",
+          value: current.untilDay,
+          required: true,
+          description: "Daily only, YYYY-MM-DD",
+        },
         { name: "zone", label: "Time zone", value: current.timeZone, required: true },
         {
           name: "resolution",
@@ -197,6 +215,18 @@ export function createSettingsExtras(
             { label: "Day", value: "day" },
             { label: "Hour", value: "hour" },
           ],
+        },
+        {
+          name: "sinceTime",
+          label: "First instant (hourly)",
+          value: current.sinceTime ?? DateTime.formatIso(DateTime.subtract(now, { hours: 24 })),
+          description: "ISO date/time with Z or timezone offset",
+        },
+        {
+          name: "untilTime",
+          label: "End instant (hourly, exclusive)",
+          value: current.untilTime ?? DateTime.formatIso(now),
+          description: "More than zero and at most 24 hours after the first instant",
         },
         {
           name: "model",
@@ -212,29 +242,7 @@ export function createSettingsExtras(
       submitLabel: "Show usage",
       onSubmit: async (values) => {
         guard();
-        const sinceDay = UsageDay.make(values.since?.trim() ?? "");
-        const untilDay = UsageDay.make(values.until?.trim() ?? "");
-        if (sinceDay > untilDay) throw new Error("The first day must be before the last day.");
-        const timeZone = values.zone?.trim() ?? "";
-        DateTime.zoneMakeNamedUnsafe(timeZone);
-        setRange({
-          sinceDay,
-          untilDay,
-          timeZone,
-          resolution: values.resolution === "hour" ? "hour" : "day",
-          ...(values.model?.trim()
-            ? {
-                modelFilter: {
-                  include: [
-                    {
-                      model: values.model.trim(),
-                      ...(values.provider?.trim() ? { provider: values.provider.trim() } : {}),
-                    },
-                  ],
-                },
-              }
-            : {}),
-        });
+        setRange(usageChartWindow(values));
         await refreshUsage();
       },
     });
@@ -494,6 +502,7 @@ export function createSettingsExtras(
   function entriesForSection(active: ExtraSettingsSection | null): Choice[] {
     if (active === "usage")
       return [
+        ...chart.choices(),
         ...usageSettingsActions(props),
         {
           title: "Period and filters",
@@ -736,7 +745,8 @@ export function createSettingsExtras(
               <>
                 <Section title="Usage">
                   <text fg={theme.text}>
-                    {usd(value().buckets.reduce((sum, bucket) => sum + bucket.costUsd, 0))} total ·{" "}
+                    {usd(value().buckets.reduce((sum, bucket) => sum + bucket.costUsd, 0))} known
+                    cost ·{" "}
                     {value().sources.reduce((sum, source) => sum + source.distinctSessions, 0)}{" "}
                     sessions
                   </text>
@@ -747,6 +757,7 @@ export function createSettingsExtras(
                     Prices: {value().pricing.status} · {value().pricing.source}
                   </text>
                 </Section>
+                <UsageChart />
                 <For each={value().buckets}>
                   {(bucket) => (
                     <Section title={`${bucket.hourStart ?? bucket.day} · ${bucket.model}`}>
@@ -755,7 +766,8 @@ export function createSettingsExtras(
                       </text>
                       <text fg={theme.textMuted}>
                         Input {bucket.totals.uncachedInputTokens.toLocaleString()} · cached{" "}
-                        {bucket.totals.cachedInputTokens.toLocaleString()} · output{" "}
+                        {bucket.totals.cachedInputTokens.toLocaleString()} · cache writes{" "}
+                        {bucket.totals.cacheCreationTokens.toLocaleString()} · output{" "}
                         {bucket.totals.outputTokens.toLocaleString()}
                       </text>
                       <Show when={bucket.unpricedRecords}>
