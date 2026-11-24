@@ -1,5 +1,5 @@
 import { ConversationFindText } from "../conversation/find-text.tsx";
-import { revealTextMatch } from "../ui/reveal-match.ts";
+import { createTextMatchRevealer } from "../ui/reveal-match.ts";
 import { findThreadSearchOccurrences } from "@t3tools/shared/threadSearch";
 import { scrollbarOptions } from "../ui/scroll.ts";
 import { DiffRenderable, pathToFiletype, type ScrollBoxRenderable } from "@opentui/core";
@@ -128,6 +128,11 @@ export function ChangesPanel(
   const findKey = () =>
     JSON.stringify([environment(), props.cwd(), source()?.diffHash, currentFile()?.path]);
   const activeFind = () => (diffFind()?.key === findKey() ? diffFind() : null);
+  const revealMatch = createTextMatchRevealer(
+    renderer,
+    () => diffScroll,
+    () => !disposed && Boolean(activeFind()),
+  );
   const matches = createMemo(() =>
     activeFind()
       ? findThreadSearchOccurrences(patch()?.source?.diff ?? "", activeFind()!.query)
@@ -506,11 +511,9 @@ export function ChangesPanel(
                         wordWrap
                         onActiveMatch={(node, offset) => {
                           const captured = findKey();
-                          revealTextMatch(
-                            diffScroll,
+                          revealMatch(
                             node,
                             offset,
-                            renderer,
                             () => !disposed && captured === findKey() && Boolean(activeFind()),
                           );
                         }}

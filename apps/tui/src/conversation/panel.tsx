@@ -1,11 +1,6 @@
-import { revealTextMatch } from "../ui/reveal-match.ts";
+import { createTextMatchRevealer } from "../ui/reveal-match.ts";
 import { scrollbarOptions } from "../ui/scroll.ts";
-import type {
-  Renderable,
-  ScrollBoxRenderable,
-  TextareaRenderable,
-  TextRenderable,
-} from "@opentui/core";
+import type { Renderable, ScrollBoxRenderable, TextareaRenderable } from "@opentui/core";
 import { decodePasteBytes, stripAnsiSequences, type PasteEvent } from "@opentui/core";
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/solid";
 import { createEffect, createMemo, createSignal, For, on, onCleanup, Show } from "solid-js";
@@ -609,9 +604,11 @@ function ThreadConversation(
         throw new Error("This match is not available in the loaded conversation history.");
     },
   });
-  function revealFindMatch(node: TextRenderable, offset: number) {
-    revealTextMatch(history, node, offset, renderer, () => !disposed && findState().open);
-  }
+  const revealFindMatch = createTextMatchRevealer(
+    renderer,
+    () => history,
+    () => !disposed && findState().open,
+  );
 
   onCleanup(find.dispose);
   // Open find follows server-owned history changes, coalescing streamed deltas between searches.

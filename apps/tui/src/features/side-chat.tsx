@@ -71,18 +71,44 @@ export function createSideChats(props: FeatureProps & { navigationVersion?: () =
       };
     }
   });
-  const current = () => {
+  const liveShell = createMemo(() => props.state()?.shell);
+  const selectedId = createMemo(() => props.state()?.thread?.thread.id);
+  const selectedTitle = createMemo(() => props.state()?.thread?.thread.title);
+  const current = createMemo(() => {
     const value = family();
-    return value && JSON.stringify([value.environment, value.parent]) === scope() ? value : null;
-  };
-  const children = () =>
-    current()?.threads.filter(
-      (thread) =>
-        thread.deletedAt === null &&
-        thread.archivedAt === null &&
-        thread.lineage.sideChat &&
-        thread.lineage.parentThreadId === current()!.parent,
-    ) ?? [];
+    if (!value || JSON.stringify([value.environment, value.parent]) !== scope()) return null;
+    const shell = liveShell();
+    const latest = new Map(
+      [...(shell?.threads ?? []), ...(shell?.archivedThreads ?? [])].map((thread) => [
+        thread.id,
+        thread,
+      ]),
+    );
+    return {
+      ...value,
+      threads: value.threads.map((thread) => {
+        const live = latest.get(thread.id);
+        if (live) return live;
+        return selectedId() === thread.id &&
+          selectedTitle() !== undefined &&
+          selectedTitle() !== thread.title
+          ? { ...thread, title: selectedTitle()! }
+          : thread;
+      }),
+    };
+  });
+  const children = createMemo(() => {
+    const value = current();
+    return (
+      value?.threads.filter(
+        (thread) =>
+          thread.deletedAt === null &&
+          thread.archivedAt === null &&
+          thread.lineage.sideChat &&
+          thread.lineage.parentThreadId === value.parent,
+      ) ?? []
+    );
+  });
   const key = (id: string) => `${scope()}/${id}`;
   const visible = () =>
     children().filter(
@@ -90,11 +116,9 @@ export function createSideChats(props: FeatureProps & { navigationVersion?: () =
     );
   function navigation(threadId: string) {
     const captured = current();
-    const version = props.navigationVersion?.();
     return () => {
       const latest = current();
       if (
-        version !== props.navigationVersion?.() ||
         !captured ||
         !latest ||
         latest.environment !== captured.environment ||

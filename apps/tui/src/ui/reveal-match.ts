@@ -1,3 +1,4 @@
+import { createEffect, onCleanup } from "solid-js";
 import {
   TextBuffer,
   type CliRenderer,
@@ -5,7 +6,7 @@ import {
   type TextRenderable,
 } from "@opentui/core";
 
-export function revealTextMatch(
+function revealTextMatch(
   box: ScrollBoxRenderable | undefined,
   node: TextRenderable,
   offset: number,
@@ -38,4 +39,51 @@ export function revealTextMatch(
       x: x < left || x >= left + box.viewport.width ? box.scrollLeft + x - left : box.scrollLeft,
     });
   });
+}
+
+export function createTextMatchRevealer(
+  renderer: Pick<CliRenderer, "widthMethod" | "nativeScene">,
+  scroll: () => ScrollBoxRenderable | undefined,
+  enabled: () => boolean,
+) {
+  let anchor:
+    | { box: ScrollBoxRenderable; node: TextRenderable; offset: number; current: () => boolean }
+    | undefined;
+  let detach: (() => void) | undefined;
+  function clear() {
+    detach?.();
+    detach = undefined;
+    anchor = undefined;
+  }
+  const reveal = () => {
+    const captured = anchor;
+    if (!captured) return;
+    revealTextMatch(
+      captured.box,
+      captured.node,
+      captured.offset,
+      renderer,
+      () => anchor === captured && enabled() && captured.current() && scroll() === captured.box,
+    );
+  };
+  // Active find follows native viewport and text reflow; closed find owns no listeners.
+  createEffect(() => {
+    if (!enabled()) clear();
+  });
+  onCleanup(clear);
+  return (node: TextRenderable, offset: number, current: () => boolean = () => true) => {
+    const box = scroll();
+    if (!box || !enabled()) return;
+    if (anchor?.box !== box || anchor.node !== node) {
+      clear();
+      box.viewport.on("resize", reveal);
+      node.on("line-info-change", reveal);
+      detach = () => {
+        box.viewport.off("resize", reveal);
+        node.off("line-info-change", reveal);
+      };
+    }
+    anchor = { box, node, offset, current };
+    reveal();
+  };
 }
