@@ -488,12 +488,13 @@ export function App(props: { client: TuiClient | null; demo?: boolean; onExit: (
     });
   }
   function exit() {
+    const generation = ++navigationRequest;
     void beforeNavigate().then((approved) => {
-      if (approved) props.onExit();
+      if (approved && generation === navigationRequest) props.onExit();
     });
   }
   function openThread(id: string, target?: ThreadSearchTarget) {
-    navigationRequest += 1;
+    const generation = ++navigationRequest;
     if (id === state()?.selectedThreadId && area() === "chat") {
       setSearchTarget(target);
       setFocus("main");
@@ -502,7 +503,12 @@ export function App(props: { client: TuiClient | null; demo?: boolean; onExit: (
     }
     const destination = state()?.environmentId;
     void run(async () => {
-      if (!(await beforeNavigate()) || state()?.environmentId !== destination) return;
+      if (
+        !(await beforeNavigate()) ||
+        generation !== navigationRequest ||
+        state()?.environmentId !== destination
+      )
+        return;
       setSearchTarget(target);
       client().selectThread(id);
       setArea("chat");
@@ -552,14 +558,14 @@ export function App(props: { client: TuiClient | null; demo?: boolean; onExit: (
     });
   }
   function openArea(next: Area) {
-    navigationRequest += 1;
+    const generation = ++navigationRequest;
     if (next === area()) {
       setSettingsProviderTarget(undefined);
       setFocus("main");
       return;
     }
     void beforeNavigate().then((approved) => {
-      if (approved) {
+      if (approved && generation === navigationRequest) {
         setSettingsProviderTarget(undefined);
         setArea(next);
         setFocus("main");
@@ -567,9 +573,10 @@ export function App(props: { client: TuiClient | null; demo?: boolean; onExit: (
     });
   }
   function searchSettings() {
+    const generation = ++navigationRequest;
     const check = scope();
     void run(async () => {
-      if (!(await beforeNavigate())) return;
+      if (!(await beforeNavigate()) || generation !== navigationRequest) return;
       check();
       setSettingsProviderTarget(undefined);
       setArea("settings");
@@ -584,8 +591,9 @@ export function App(props: { client: TuiClient | null; demo?: boolean; onExit: (
       notify("Select a conversation before opening its goal.");
       return;
     }
+    const generation = ++navigationRequest;
     void run(async () => {
-      if (!(await beforeNavigate())) return;
+      if (!(await beforeNavigate()) || generation !== navigationRequest) return;
       check();
       if (state()?.selectedThreadId !== id)
         throw new Error("The conversation changed. Open its goal again.");
@@ -653,6 +661,7 @@ export function App(props: { client: TuiClient | null; demo?: boolean; onExit: (
     });
   }
   function toggleWorkspace() {
+    const generation = ++navigationRequest;
     if (dimensions().width < 132) {
       openArea("workspace");
       return;
@@ -662,13 +671,14 @@ export function App(props: { client: TuiClient | null; demo?: boolean; onExit: (
       return;
     }
     void beforeNavigate().then((approved) => {
-      if (approved) setWorkspace(false);
+      if (approved && generation === navigationRequest) setWorkspace(false);
     });
   }
   function showChanges() {
+    const generation = ++navigationRequest;
     if (dimensions().width >= 132 && area() !== "chat") {
       void beforeNavigate().then((approved) => {
-        if (approved) {
+        if (approved && generation === navigationRequest) {
           setWorkspaceTab("changes");
           setArea("chat");
           setWorkspace(true);
@@ -685,9 +695,15 @@ export function App(props: { client: TuiClient | null; demo?: boolean; onExit: (
     } else openArea("workspace");
   }
   function showThreadTerminals(id: string) {
+    const generation = ++navigationRequest;
     const destination = environment();
     void run(async () => {
-      if (!(await beforeNavigate()) || environment() !== destination) return;
+      if (
+        !(await beforeNavigate()) ||
+        generation !== navigationRequest ||
+        environment() !== destination
+      )
+        return;
       if (state()?.selectedThreadId !== id) client().selectThread(id);
       setWorkspaceTab("terminals");
       if (dimensions().width >= 132) {
@@ -701,9 +717,10 @@ export function App(props: { client: TuiClient | null; demo?: boolean; onExit: (
     });
   }
   function openFile(path: string, line = 1) {
+    const generation = ++navigationRequest;
     if (dimensions().width >= 132 && area() !== "chat") {
       void beforeNavigate().then((approved) => {
-        if (approved) {
+        if (approved && generation === navigationRequest) {
           batch(() => {
             setOpenPath(path);
             setOpenLine(line);
@@ -754,6 +771,13 @@ export function App(props: { client: TuiClient | null; demo?: boolean; onExit: (
       },
     });
   }
+  async function openEnvironment(id: string) {
+    const generation = ++navigationRequest;
+    const check = scope();
+    if (!(await beforeNavigate()) || generation !== navigationRequest) return;
+    check();
+    await client().selectEnvironment(id, () => generation === navigationRequest);
+  }
   function environments() {
     void run(async () => {
       const available = await client().environments();
@@ -761,13 +785,7 @@ export function App(props: { client: TuiClient | null; demo?: boolean; onExit: (
         ...available.map((entry) => ({
           title: entry.label,
           category: entry.environmentId === state()?.environmentId ? "Connected" : "",
-          run: () =>
-            void run(async () => {
-              if (await beforeNavigate()) {
-                navigationRequest += 1;
-                await client().selectEnvironment(entry.environmentId);
-              }
-            }),
+          run: () => void run(() => openEnvironment(entry.environmentId)),
         })),
         { title: "Pair another environment…", run: pair },
         { title: "Manage connections…", run: () => openArea("settings") },
@@ -1200,6 +1218,7 @@ export function App(props: { client: TuiClient | null; demo?: boolean; onExit: (
     modal: () => modal() !== null,
     modalIdentity: modal,
     beforeNavigate,
+    openEnvironment,
     registerNavigationGuard: (guard, discard) => {
       navigationGuards.set(guard, discard);
       return () => navigationGuards.delete(guard);
@@ -1254,9 +1273,10 @@ export function App(props: { client: TuiClient | null; demo?: boolean; onExit: (
     openProviderSettings: (instanceId) => {
       const id = environment();
       if (!id) return;
+      const generation = ++navigationRequest;
       const check = scope();
       void run(async () => {
-        if (!(await beforeNavigate())) return;
+        if (!(await beforeNavigate()) || generation !== navigationRequest) return;
         check();
         setSettingsProviderTarget({ environmentId: id, instanceId });
         setArea("settings");
@@ -1982,7 +2002,10 @@ export function App(props: { client: TuiClient | null; demo?: boolean; onExit: (
                         focused={activeFocus() === "main"}
                         onFocus={() => setFocus("main")}
                         initialTab={workspaceTab()}
-                        onTabChange={setWorkspaceTab}
+                        onTabChange={(tab) => {
+                          navigationRequest += 1;
+                          setWorkspaceTab(tab);
+                        }}
                         openPath={openPath()}
                         openLine={openLine()}
                       />
@@ -2076,7 +2099,10 @@ export function App(props: { client: TuiClient | null; demo?: boolean; onExit: (
                         focused={activeFocus() === "workspace"}
                         onFocus={() => setFocus("workspace")}
                         initialTab={workspaceTab()}
-                        onTabChange={setWorkspaceTab}
+                        onTabChange={(tab) => {
+                          navigationRequest += 1;
+                          setWorkspaceTab(tab);
+                        }}
                         openPath={openPath()}
                         openLine={openLine()}
                         visible={showWorkspace()}

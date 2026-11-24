@@ -34,9 +34,7 @@ export async function connectionDiagnosticsActions(
           void props.ui.run(async () => {
             guard();
             if (!use) return connectionDiagnosticsActions(props, entry.environmentId);
-            if (!(await props.ui.beforeNavigate())) return;
-            guard();
-            await props.client.selectEnvironment(entry.environmentId);
+            await props.ui.openEnvironment(entry.environmentId);
           }),
       })),
     );

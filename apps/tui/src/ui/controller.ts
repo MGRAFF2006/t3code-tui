@@ -52,6 +52,7 @@ export interface UiController {
   previewImage?(resource: AssetResource, label: string): void;
   openBrowser?(url: string): void;
   openThread(id: string): void;
+  openEnvironment(id: string): Promise<void>;
   openArea(area: Area): void;
   openProviderSettings?(instanceId: ProviderInstanceId): void;
   openFile(path: string, line?: number): void;

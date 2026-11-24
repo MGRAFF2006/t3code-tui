@@ -955,11 +955,7 @@ export function SettingsPanel(
                 entries.map((entry) => ({
                   title: entry.label,
                   description: entry.environmentId,
-                  run: () =>
-                    void props.ui.run(async () => {
-                      if (await props.ui.beforeNavigate())
-                        await props.client.selectEnvironment(entry.environmentId);
-                    }),
+                  run: () => void props.ui.run(() => props.ui.openEnvironment(entry.environmentId)),
                 })),
               );
             }),

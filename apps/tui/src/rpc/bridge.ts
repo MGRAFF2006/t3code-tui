@@ -110,12 +110,11 @@ export function createRpcBridge<R, ER>(
                 }),
               );
             }),
-          ),
+          ).pipe(Stream.runForEach((value) => Effect.sync(() => onValue(value)))),
         )
         .pipe(Atom.setIdleTTL(0));
       return observe(atom, (result) => {
-        if (result._tag === "Success") onValue(result.value);
-        else if (result._tag === "Failure") onError?.(new Error(Cause.pretty(result.cause)));
+        if (result._tag === "Failure") onError?.(new Error(Cause.pretty(result.cause)));
       });
     },
   };
