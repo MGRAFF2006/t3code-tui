@@ -103,6 +103,16 @@ export function ArchivePreview(props: {
       </box>
       <Show when={searching()}>
         <input
+          keyBindings={[
+            { name: "a", ctrl: true, action: "select-all" },
+            { name: "return", action: "submit" },
+            { name: "kpenter", action: "submit" },
+            { name: "linefeed", action: "submit" },
+          ]}
+          backgroundColor={theme.background}
+          textColor={theme.text}
+          focusedTextColor={theme.text}
+          cursorColor={theme.primary}
           placeholder="Find archive entry…"
           value={query()}
           focused={props.focused}

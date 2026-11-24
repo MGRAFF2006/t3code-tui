@@ -730,6 +730,7 @@ export function FilesPanel(
         <Show when={!props.compact || preview()}>
           <box flexGrow={1} minWidth={0} minHeight={0} paddingX={1}>
             <Show
+              keyed
               when={archive()}
               fallback={
                 <Show
@@ -847,9 +848,9 @@ export function FilesPanel(
                     fg={theme.textMuted}
                     truncate
                     flexShrink={0}
-                  >{`${current().path}${reading() ? "  Loading…" : ""}`}</text>
+                  >{`${current.path}${reading() ? "  Loading…" : ""}`}</text>
                   <ArchivePreview
-                    archive={current().entries}
+                    archive={current.entries}
                     focused={props.visible && props.focused && preview() && !props.ui.modal()}
                     onFocus={() => {
                       props.onFocus();
