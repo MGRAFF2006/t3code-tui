@@ -645,12 +645,12 @@ it.layer(layerTest, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
             contents,
             expectedContents: "original\n",
           }));
-          const results = yield* Effect.all(
-            saves.map((input) =>
+          const results = yield* Effect.forEach(
+            saves,
+            (input) =>
               files
                 .writeFile(input)
                 .pipe(Effect.match({ onSuccess: () => "saved", onFailure: (error) => error._tag })),
-            ),
             { concurrency: "unbounded" },
           );
           expect(results.toSorted()).toEqual(["WorkspaceFileChangedError", "saved"]);

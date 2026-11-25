@@ -1,5 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off -- Terminal connection credentials use private files in the client state directory.
 import * as NodeFSP from "node:fs/promises";
+import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 import * as NodeCrypto from "node:crypto";
 
@@ -28,9 +29,27 @@ export async function writePrivateFile(filename: string, contents: string) {
   const temporary = `${filename}.${NodeCrypto.randomUUID()}.tmp`;
   try {
     await NodeFSP.writeFile(temporary, contents, { mode: 0o600, flag: "wx" });
-    await NodeFSP.rename(temporary, filename);
+    await replacePrivateFile(temporary, filename);
   } finally {
     await NodeFSP.rm(temporary, { force: true });
+  }
+}
+
+export async function replacePrivateFile(source: string, destination: string) {
+  try {
+    await NodeFSP.rename(source, destination);
+  } catch (error) {
+    if (
+      !(
+        process.versions.bun &&
+        error instanceof Error &&
+        "code" in error &&
+        error.code === "ENOSPC"
+      )
+    )
+      throw error;
+    // Bun's async rename can report ENOSPC where its atomic synchronous rename succeeds.
+    NodeFS.renameSync(source, destination);
   }
 }
 

@@ -6,12 +6,14 @@ import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import {
   CommandId,
+  ComposerContextId,
   EnvironmentId,
   MessageId,
   ProviderInstanceId,
   ThreadId,
 } from "@t3tools/contracts";
 import { createSendOutbox, type PendingSend, type PendingSendInput } from "./send-outbox.ts";
+import { createDraftStore } from "../conversation/draft-storage.ts";
 
 const withDirectory = <A, E, R>(use: (directory: string) => Effect.Effect<A, E, R>) =>
   Effect.acquireUseRelease(
@@ -36,7 +38,15 @@ const entry = (): PendingSend => ({
   steps: [input("compact", "/compact"), input("send", "message with private context")],
   composerDraft: {
     text: "raw @mention",
-    mentions: [],
+    mentions: [
+      {
+        version: 1,
+        kind: "mention",
+        contextId: ComposerContextId.make("mention-file"),
+        label: "src/a.ts",
+        path: "src/a.ts",
+      },
+    ],
     context: [],
     attachments: [],
     freshContext: false,
@@ -52,6 +62,11 @@ describe("terminal uncertain-send outbox", () => {
         Effect.gen(function* () {
           const first = yield* Effect.promise(() => createSendOutbox(directory));
           const original = entry();
+          const persistence = createDraftStore(directory, () => {});
+          yield* Effect.promise(() => persistence.ready);
+          const scope = `${original.environmentId}/${original.threadId}`;
+          persistence.save(scope, original.composerDraft!);
+          yield* Effect.promise(persistence.flush);
           yield* Effect.promise(() => first.add(original));
           const attempts: PendingSendInput[] = [];
           yield* Effect.promise(() =>
@@ -89,11 +104,14 @@ describe("terminal uncertain-send outbox", () => {
               async () => {
                 throw new Error("Accepted message must not dispatch again");
               },
-              async () => {},
+              async (saved) => persistence.settle(scope, saved.composerDraft!),
             ),
           );
           expect(attempts).toEqual([original.steps[0], original.steps[1], original.steps[1]]);
           expect((yield* Effect.promise(() => createSendOutbox(directory))).get()).toEqual([]);
+          const settled = createDraftStore(directory, () => {});
+          yield* Effect.promise(() => settled.ready);
+          expect(settled.get(scope)).toBeUndefined();
           expect(
             (yield* Effect.promise(() => NodeFSP.stat(NodePath.join(directory, "pending-sends"))))
               .mode & 0o777,

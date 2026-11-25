@@ -1338,6 +1338,7 @@ export async function createTuiClient(options: TuiConnectionOptions = {}) {
       sendingThreads.add(scope);
       try {
         await outbox.reserve(destination, threadId, async (reserved) => {
+          if (options?.composerDraft) await draftStore(configDir, () => {}).flush();
           const commandId = CommandId.make(await uuid());
           const messageId = MessageId.make(await uuid());
           const uploaded = locals.length

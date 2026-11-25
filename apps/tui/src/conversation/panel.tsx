@@ -78,7 +78,7 @@ import {
   settleSentDraft,
   type Draft,
 } from "./draft.ts";
-import { draftStore } from "./draft-storage.ts";
+import { draftStore, sameDraft } from "./draft-storage.ts";
 import { contextActions } from "./context-actions.ts";
 import { planActions } from "./plan.ts";
 import { createFanoutTargets, startFanoutTargets, type FanoutTarget } from "./fanout.ts";
@@ -1703,7 +1703,7 @@ function ThreadConversation(
           : {}),
       });
       const current = drafts.get(scope) ?? captured;
-      const unchanged = JSON.stringify(current) === JSON.stringify(captured);
+      const unchanged = sameDraft(current, captured);
       const next = unchanged
         ? (persistence.get(scope) ?? settleSentDraft(current, captured))
         : current;

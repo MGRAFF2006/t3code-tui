@@ -132,12 +132,16 @@ export async function createSendOutbox(configDir: string) {
           }
         }),
     );
-    entries = next
-      .filter((entry) => entry !== null)
-      .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
-    invalid = bad.sort((a, b) => a.file.localeCompare(b.file));
+    const snapshot = {
+      entries: next
+        .filter((entry) => entry !== null)
+        .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id)),
+      invalid: bad.sort((a, b) => a.file.localeCompare(b.file)),
+    };
+    entries = snapshot.entries;
+    invalid = snapshot.invalid;
     for (const listener of listeners) listener(entries);
-    return entries;
+    return snapshot;
   }
   async function save(entry: PendingSend) {
     await writePrivateFile(path(entry.id), encode({ version: 1, send: entry }));
@@ -173,11 +177,11 @@ export async function createSendOutbox(configDir: string) {
     await refresh();
   };
   async function add(entry: PendingSend) {
-    await refresh();
-    if (entries.some((existing) => existing.id === entry.id))
+    const current = await refresh();
+    if (current.entries.some((existing) => existing.id === entry.id))
       throw new Error("This send is already pending.");
     if (
-      entries.some(
+      current.entries.some(
         (existing) =>
           existing.environmentId === entry.environmentId && existing.threadId === entry.threadId,
       )
@@ -186,7 +190,7 @@ export async function createSendOutbox(configDir: string) {
         "This conversation has an unconfirmed send. Open Pending sends to check or retry the original message.",
       );
     if (
-      invalid.some(
+      current.invalid.some(
         (existing) =>
           existing.file === path(entry.id) ||
           (existing.environmentId === entry.environmentId && existing.threadId === entry.threadId),
@@ -227,7 +231,7 @@ export async function createSendOutbox(configDir: string) {
   return {
     get: () => entries,
     invalid: () => invalid,
-    refresh,
+    refresh: async () => (await refresh()).entries,
     read,
     reserve: <A>(
       environmentId: string,
@@ -235,9 +239,9 @@ export async function createSendOutbox(configDir: string) {
       prepare: (operations: { add: typeof add; dispatch: typeof dispatch }) => Promise<A>,
     ) =>
       withScope(environmentId, threadId, async () => {
-        await refresh();
+        const current = await refresh();
         if (
-          entries.some(
+          current.entries.some(
             (entry) => entry.environmentId === environmentId && entry.threadId === threadId,
           )
         )
@@ -245,7 +249,7 @@ export async function createSendOutbox(configDir: string) {
             "This conversation has an unconfirmed send. Open Pending sends to check or retry the original message.",
           );
         if (
-          invalid.some(
+          current.invalid.some(
             (entry) => entry.environmentId === environmentId && entry.threadId === threadId,
           )
         )
@@ -295,21 +299,21 @@ export async function createSendOutbox(configDir: string) {
         return entry;
       }),
     inspectInvalid: async (file: string) => {
-      await refresh();
-      if (!invalid.some((entry) => entry.file === file))
+      const current = await refresh();
+      if (!current.invalid.some((entry) => entry.file === file))
         throw new Error("This unreadable record is no longer present.");
       return (await readPrivateFile(file)) ?? "The record no longer exists.";
     },
     moveAside: async (file: string) => {
-      await refresh();
-      const original = invalid.find((entry) => entry.file === file);
+      const current = await refresh();
+      const original = current.invalid.find((entry) => entry.file === file);
       if (!original) throw new Error("This unreadable record is no longer present.");
       return withScope(
         original.environmentId ?? "invalid-file",
         original.threadId ?? file,
         async () => {
-          await refresh();
-          if (!invalid.some((entry) => entry.file === file))
+          const checked = await refresh();
+          if (!checked.invalid.some((entry) => entry.file === file))
             throw new Error("This record changed. Inspect it again before moving it aside.");
           // link refuses to overwrite an earlier recovery copy.
           await NodeFSP.link(file, `${file}.invalid`);

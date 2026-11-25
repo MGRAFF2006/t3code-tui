@@ -5,8 +5,12 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import { expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
-import { createDraftStore } from "./draft-storage.ts";
+import * as Schema from "effect/Schema";
+import { ComposerContextId } from "@t3tools/contracts";
+import { createDraftStore, DraftSchema } from "./draft-storage.ts";
 import type { Draft } from "./draft.ts";
+
+const decodeDraft = Schema.decodeEffect(DraftSchema);
 
 const draft = (text: string): Draft => ({
   text,
@@ -27,6 +31,32 @@ it.effect(
           const first = createDraftStore(directory, (message) => errors.push(message));
           const second = createDraftStore(directory, (message) => errors.push(message));
           yield* Effect.promise(() => Promise.all([first.ready, second.ready]));
+          first.save("rapid-send", draft("fix the bug"));
+          yield* Effect.promise(first.flush);
+          first.save("rapid-send", draft("fix the bug in panel"));
+          yield* Effect.promise(() => first.settle("rapid-send", draft("fix the bug in panel")));
+          expect(first.get("rapid-send")).toBeUndefined();
+          const withContext: Draft = {
+            ...draft("Read this terminal output"),
+            context: [
+              {
+                version: 1,
+                kind: "terminal",
+                contextId: ComposerContextId.make("terminal-output"),
+                label: "Shell output",
+                terminalId: "shell",
+                terminalLabel: "Shell",
+                lineStart: 1,
+                lineEnd: 1,
+                text: "output",
+              },
+            ],
+          };
+          first.save("context-send", withContext);
+          yield* Effect.promise(first.flush);
+          const sentContext = yield* decodeDraft(withContext);
+          yield* Effect.promise(() => first.settle("context-send", sentContext));
+          expect(first.get("context-send")).toBeUndefined();
           first.save("environment-a/thread-a", { ...draft("Original prompt"), freshContext: true });
           second.save("environment-b/thread-a", draft("Different environment"));
           yield* Effect.promise(async () => {
@@ -36,7 +66,10 @@ it.effect(
           second.save("environment-a/thread-a", draft("Newer draft in another window"));
           yield* Effect.promise(second.flush);
           yield* Effect.promise(() =>
-            first.settle("environment-a/thread-a", draft("Original prompt")),
+            first.settle("environment-a/thread-a", {
+              ...draft("Original prompt"),
+              freshContext: true,
+            }),
           );
           const settled = createDraftStore(directory, (message) => errors.push(message));
           yield* Effect.promise(() => settled.ready);

@@ -12,6 +12,7 @@ import * as Fiber from "effect/Fiber";
 import * as Schema from "effect/Schema";
 import { hasDraftContent, settleSentDraft, type Draft } from "./draft.ts";
 import { acquirePrivateStateLock } from "../connections/state-lock.ts";
+import { replacePrivateFile } from "../connections/files.ts";
 
 const LocalAttachment = Schema.Struct({
   id: Schema.String.check(Schema.isMaxLength(128)),
@@ -35,6 +36,7 @@ export const DraftSchema = Schema.Struct({
   ),
   freshContext: Schema.Boolean,
 });
+export const sameDraft = Schema.toEquivalence(DraftSchema);
 const StashEntrySchema = Schema.Struct({
   id: Schema.String.check(Schema.isMaxLength(128)),
   scope: Schema.String.check(Schema.isMaxLength(4096)),
@@ -142,7 +144,7 @@ export function createDraftStore(directory: string, onError: (message: string) =
               "TUI draft storage is full. Remove saved prompts or shorten the draft before saving more.",
             );
           await NodeFSP.writeFile(temporary, encoded, { mode: 0o600, flag: "wx" });
-          await NodeFSP.rename(temporary, filename);
+          await replacePrivateFile(temporary, filename);
         } finally {
           try {
             await NodeFSP.rm(temporary, { force: true });
@@ -195,7 +197,7 @@ export function createDraftStore(directory: string, onError: (message: string) =
           if (value && hasDraftContent(value)) next.drafts[scope] = value;
           else delete next.drafts[scope];
           await NodeFSP.writeFile(temporary, JSON.stringify(next), { mode: 0o600, flag: "wx" });
-          await NodeFSP.rename(temporary, filename);
+          await replacePrivateFile(temporary, filename);
           if (pending.get(scope) === before) {
             pending.delete(scope);
             const local = discardPending ? undefined : before && apply(before);
@@ -219,14 +221,14 @@ export function createDraftStore(directory: string, onError: (message: string) =
   };
   return {
     ready,
-    settle: (scope: string, sent: Draft) =>
-      transform(
+    settle: async (scope: string, sent: Draft) => {
+      await flush();
+      return transform(
         scope,
-        (value) =>
-          value &&
-          (JSON.stringify(value) === JSON.stringify(sent) ? settleSentDraft(value, sent) : value),
+        (value) => value && (sameDraft(value, sent) ? settleSentDraft(value, sent) : value),
         false,
-      ),
+      );
+    },
     clear: (scope: string) => transform(scope, () => undefined, true),
     refresh: () => {
       writing = writing

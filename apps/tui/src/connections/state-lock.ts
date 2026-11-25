@@ -7,16 +7,14 @@ export async function acquirePrivateStateLock(
   busyMessage = "TUI state is busy in another terminal. Retry after its operation finishes.",
   options: { wait?: boolean } = {},
 ) {
-  const handle = await NodeFSP.open(filename, "a", 0o600);
-  await handle.close();
-  const Database = process.versions.bun
-    ? (await import("bun:sqlite")).Database
-    : (await import("node:sqlite")).DatabaseSync;
   const attempts = options.wait === false ? 1 : 200;
   // Never unlink this file: the OS releases the transaction lock when its owner exits.
   for (let attempt = 0; attempt < attempts; attempt++) {
-    const database = new Database(filename);
+    const database = process.versions.bun
+      ? new (await import("bun:sqlite")).Database(filename, { create: true })
+      : new (await import("node:sqlite")).DatabaseSync(filename);
     try {
+      await NodeFSP.chmod(filename, 0o600);
       database.exec("PRAGMA busy_timeout = 0; BEGIN EXCLUSIVE;");
       return database;
     } catch (error) {

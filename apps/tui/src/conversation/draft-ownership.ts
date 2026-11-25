@@ -1,6 +1,6 @@
 import type { TuiClient } from "../runtime/client.ts";
 import type { PendingSend } from "../runtime/send-outbox.ts";
-import { draftStore } from "./draft-storage.ts";
+import { draftStore, sameDraft } from "./draft-storage.ts";
 import { settleSentDraft, type Draft } from "./draft.ts";
 
 export const drafts = new Map<string, Draft>();
@@ -20,7 +20,7 @@ export async function settleRecoveredSend(
   if (!entry.composerDraft) return false;
   const scope = `${entry.environmentId}/${entry.threadId}`;
   const current = drafts.get(scope);
-  if (current && JSON.stringify(current) !== JSON.stringify(entry.composerDraft)) return false;
+  if (current && !sameDraft(current, entry.composerDraft)) return false;
   if (current) {
     const next =
       draftStore(client.localStateDirectory, () => {}).get(scope) ??
@@ -54,7 +54,7 @@ export function createDraftOwnership(
       drafts.set(scope, value);
       if (persist) persistence.save(scope, value);
     },
-    changed: (value: Draft) => valid && JSON.stringify(value) !== JSON.stringify(saved),
+    changed: (value: Draft) => valid && !sameDraft(value, saved),
     invalidate: () => {
       valid = false;
       drafts.delete(scope);

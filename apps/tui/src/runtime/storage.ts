@@ -23,6 +23,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import { acquirePrivateStateLock } from "../connections/state-lock.ts";
+import { replacePrivateFile } from "../connections/files.ts";
 
 const CatalogJson = Schema.fromJsonString(ConnectionCatalogDocument);
 const decodeCatalog = Schema.decodeSync(CatalogJson);
@@ -74,7 +75,7 @@ export async function createStorage(configDir: string) {
                 mode: 0o600,
                 flag: "wx",
               });
-              await NodeFSP.rename(temporary, filename);
+              await replacePrivateFile(temporary, filename);
               document = changed;
             } finally {
               await NodeFSP.rm(temporary, { force: true });
